@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}KSP Crime Intelligence{% endblock %}</title>
+    <style>
+        :root{--navy:#071b33;--navy2:#102f52;--blue:#1b639b;--gold:#d4a733;--ink:#142238;--muted:#6b7b90;--line:#dce4ed;--bg:#f2f5f8;--white:#fff;--red:#bc3f37;--green:#277554;--amber:#a66b12}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--bg);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}.shell{min-height:100vh;display:grid;grid-template-columns:242px 1fr}.sidebar{position:sticky;top:0;height:100vh;padding:25px 18px;color:#dbe7f2;background:linear-gradient(180deg,#071b33,#0b294a)}.brand{display:flex;align-items:center;gap:11px;padding:0 9px 25px;border-bottom:1px solid #ffffff17}.crest{display:grid;place-items:center;width:39px;height:39px;border:1px solid #d9bd6f;border-radius:50%;color:#f0d889}.brand strong,.brand small{display:block}.brand strong{font-size:13px}.brand small{margin-top:3px;color:#8fa8bf;font-size:9px;letter-spacing:.11em;text-transform:uppercase}.nav-label{margin:27px 11px 9px;color:#6f8aa3;font-size:9px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}.nav a{display:flex;align-items:center;gap:11px;margin:4px 0;padding:11px 12px;border-radius:7px;color:#b9cadd;font-size:13px;text-decoration:none}.nav a:hover,.nav a.active{color:#fff;background:#ffffff12}.nav a.active{border-left:2px solid var(--gold)}.nav svg{width:17px;height:17px}.sidebar-user{position:absolute;right:18px;bottom:22px;left:18px;padding:14px;border:1px solid #ffffff12;border-radius:8px;background:#ffffff08}.sidebar-user strong,.sidebar-user span{display:block}.sidebar-user strong{font-size:12px}.sidebar-user span{margin-top:4px;color:#8fa8bf;font-size:10px;text-transform:capitalize}.topbar{height:72px;display:flex;align-items:center;justify-content:space-between;padding:0 32px;border-bottom:1px solid var(--line);background:white}.topbar h1{margin:0;font-size:19px}.topbar p{margin:3px 0 0;color:var(--muted);font-size:11px}.top-actions{display:flex;align-items:center;gap:12px}.role-pill{padding:7px 10px;border:1px solid #d8e2ec;border-radius:999px;color:#52657a;background:#f8fafc;font-size:10px;font-weight:750;letter-spacing:.05em;text-transform:uppercase}.logout{color:var(--blue);font-size:12px;font-weight:700;text-decoration:none}.content{padding:28px 32px}.card{border:1px solid var(--line);border-radius:10px;background:#fff;box-shadow:0 3px 10px #102f5208}.section-title{margin:0;font-size:15px}.section-copy{margin:5px 0 0;color:var(--muted);font-size:12px}.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:39px;padding:0 15px;border:0;border-radius:7px;color:#fff;background:var(--navy2);font:inherit;font-size:12px;font-weight:700;text-decoration:none;cursor:pointer}.btn:hover{background:var(--blue)}.btn.secondary{border:1px solid var(--line);color:#34465b;background:#fff}.search{display:flex;gap:10px}.search input{height:42px;min-width:300px;padding:0 14px;border:1px solid var(--line);border-radius:7px;outline:none;font:inherit;font-size:13px}.search input:focus{border-color:var(--blue);box-shadow:0 0 0 3px #1b639b15}.badge{display:inline-flex;padding:5px 8px;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}.badge.blue{color:#175b8d;background:#eaf4fb}.badge.red{color:#9a302b;background:#fff0ef}.badge.green{color:#256445;background:#eaf7f0}.badge.amber{color:#8a5a10;background:#fff5df}.eyebrow{margin:0 0 5px;color:var(--blue);font-size:9px;font-weight:800;letter-spacing:.13em;text-transform:uppercase}@media(max-width:850px){.shell{display:block}.sidebar{position:static;width:100%;height:auto;padding:15px}.brand{padding-bottom:12px}.nav-label,.sidebar-user{display:none}.nav{display:flex;overflow:auto}.nav a{white-space:nowrap}.topbar{height:auto;padding:18px 20px}.content{padding:20px}.search{display:grid}.search input{min-width:0;width:100%}}
+        {% block styles %}{% endblock %}
+    </style>
+</head>
+<body>
+<div class="shell">
+    <aside class="sidebar">
+        <div class="brand"><span class="crest">✦</span><div><strong>KSP Intelligence</strong><small>Investigation workspace</small></div></div>
+        <p class="nav-label">Workspace</p>
+        <nav class="nav">
+            {% if user.role != 'policymaker' %}<a class="{% if request.endpoint == 'cases' %}active{% endif %}" href="{{ url_for('cases') }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5"/></svg>Cases</a>{% endif %}
+            {% if user.role in ['investigator','analyst'] %}<a class="{% if request.endpoint == 'new_fir' %}active{% endif %}" href="{{ url_for('new_fir') }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>Add / upload FIR</a>{% endif %}
+            <a class="{% if request.endpoint == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Intelligence dashboard</a>
+            {% if request.endpoint == 'case_board' %}<a class="active" href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="12" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="m8 11 8-4M8 13l8 4"/></svg>Investigation board</a>{% endif %}
+        </nav>
+        <div class="sidebar-user"><strong>{{ user.name }}</strong><span>{{ user.rank }} · {{ user.role }}</span></div>
+    </aside>
+    <div>
+        <header class="topbar"><div><h1>{% block heading %}{% endblock %}</h1><p>{% block subheading %}{% endblock %}</p></div><div class="top-actions"><span class="role-pill">{{ user.role }}</span><a class="logout" href="{{ url_for('logout') }}">Sign out</a></div></header>
+        <main class="content">{% block content %}{% endblock %}</main>
+    </div>
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>
