@@ -2,6 +2,9 @@ from datetime import datetime
 from functools import wraps
 from pathlib import Path
 import sqlite3
+import re
+import unicodedata
+from difflib import SequenceMatcher
 from math import asin, cos, radians, sin, sqrt
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -98,6 +101,16 @@ def init_db():
                 resource TEXT NOT NULL,
                 detail TEXT
             );
+            CREATE TABLE IF NOT EXISTS fir_extractions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+                source_document TEXT,
+                source_language TEXT NOT NULL,
+                extraction_confidence INTEGER NOT NULL,
+                missing_fields TEXT,
+                verified_by TEXT,
+                created_at TEXT NOT NULL
+            );
         """)
         if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             db.executemany(
@@ -175,11 +188,48 @@ def find_case(case_id):
 
 def linked_cases(case_id):
     with get_db() as db:
-        rows = db.execute("""SELECT DISTINCT linked.* FROM case_accused target
-            JOIN case_accused related ON related.accused_id=target.accused_id AND related.case_id<>target.case_id
-            JOIN cases linked ON linked.id=related.case_id
-            WHERE target.case_id=? ORDER BY linked.incident_date DESC""", (case_id,)).fetchall()
-        return [case_from_row(row, db) for row in rows]
+        source_row = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
+        if not source_row:
+            return []
+        source = case_from_row(source_row, db)
+        candidates = []
+        for row in db.execute("SELECT * FROM cases WHERE id<>?", (case_id,)).fetchall():
+            candidate = case_from_row(row, db)
+            reasons, evidence, score = [], [], 0
+            person_matches = []
+            for source_name in source["accused"]:
+                for candidate_name in candidate["accused"]:
+                    similarity = person_name_score(source_name, candidate_name)
+                    if similarity >= 88:
+                        person_matches.append((source_name, candidate_name, similarity))
+            if person_matches:
+                best = max(person_matches, key=lambda item: item[2])
+                score += round(best[2] * .65)
+                reasons.append(f"accused identity {best[2]}%")
+                evidence.append({"table": "Accused", "field": "AccusedName", "value": f"{best[0]} ↔ {best[1]}"})
+            if source["minor"].casefold() == candidate["minor"].casefold():
+                score += 15
+                reasons.append("same crime sub-head")
+                evidence.append({"table": "CrimeSubHead", "field": "CrimeHeadName", "value": source["minor"]})
+            if all((source["lat"], source["lng"], candidate["lat"], candidate["lng"])):
+                distance = distance_km(source["lat"], source["lng"], candidate["lat"], candidate["lng"])
+                if distance <= 5:
+                    score += max(3, round(10 - distance))
+                    reasons.append(f"{distance:.1f} km apart")
+                    evidence.append({"table": "CaseMaster", "field": "latitude/longitude", "value": f"{distance:.1f} km"})
+            try:
+                source_hour, candidate_hour = int(source["time"][:2]), int(candidate["time"][:2])
+                hour_gap = min(abs(source_hour - candidate_hour), 24 - abs(source_hour - candidate_hour))
+                if hour_gap <= 2:
+                    score += 10 - hour_gap * 2
+                    reasons.append("similar time window")
+                    evidence.append({"table": "CaseMaster", "field": "IncidentFromDate", "value": f"{source['time']} ↔ {candidate['time']}"})
+            except (TypeError, ValueError):
+                pass
+            if score >= 55:
+                candidate.update({"link_score": min(score, 100), "link_reasons": reasons, "link_evidence": evidence})
+                candidates.append(candidate)
+        return sorted(candidates, key=lambda item: (item["link_score"], item["date"]), reverse=True)
 
 
 def board_payload(case):
@@ -240,6 +290,79 @@ def detect_language(text):
     return language if count else "English / Latin script"
 
 
+FIELD_PATTERNS = {
+    "crime_no": [r"(?:crime\s*(?:no|number)|ಅಪರಾಧ\s*ಸಂಖ್ಯೆ|अपराध\s*संख्या)\s*[:\-]\s*([A-Z0-9/\-]+)"],
+    "case_no": [r"(?:case\s*(?:no|number)|ಪ್ರಕರಣ\s*ಸಂಖ್ಯೆ|मामला\s*संख्या)\s*[:\-]\s*([A-Z0-9/\-]+)"],
+    "title": [r"(?:case\s*title|ಶೀರ್ಷಿಕೆ|शीर्षक)\s*[:\-]\s*([^\n\r]+)"],
+    "major": [r"(?:major\s*(?:crime\s*)?head|ಪ್ರಮುಖ\s*ಅಪರಾಧ|प्रमुख\s*अपराध)\s*[:\-]\s*([^\n\r]+)"],
+    "minor": [r"(?:minor\s*(?:crime\s*)?head|offence|ಅಪರಾಧದ\s*ವಿಧ|अपराध\s*प्रकार)\s*[:\-]\s*([^\n\r]+)"],
+    "gravity": [r"(?:gravity|ಗಂಭೀರತೆ|गंभीरता)\s*[:\-]\s*(heinous|non[\s-]*heinous|ಘೋರ|ಅಘೋರ|जघन्य|गैर[\s-]*जघन्य)"],
+    "station": [r"(?:police\s*station|ಠಾಣೆ|पुलिस\s*थाना)\s*[:\-]\s*([^\n\r]+)"],
+    "district": [r"(?:district|ಜಿಲ್ಲೆ|जिला)\s*[:\-]\s*([^\n\r]+)"],
+    "incident_date": [r"(?:incident\s*date|date\s*of\s*occurrence|ಘಟನೆಯ\s*ದಿನಾಂಕ|घटना\s*दिनांक)\s*[:\-]\s*([^\n\r]+)"],
+    "incident_time": [r"(?:incident\s*time|time\s*of\s*occurrence|ಘಟನೆಯ\s*ಸಮಯ|घटना\s*समय)\s*[:\-]\s*([0-2]?\d[:.]\d{2}(?:\s*[AP]M)?)"],
+    "location": [r"(?:location|place\s*of\s*occurrence|ಘಟನಾ\s*ಸ್ಥಳ|घटना\s*स्थल)\s*[:\-]\s*([^\n\r]+)"],
+    "complainant": [r"(?:complainant|ದೂರುದಾರ|शिकायतकर्ता)\s*[:\-]\s*([^\n\r]+)"],
+    "victim": [r"(?:victim|ಪೀಡಿತ|पीड़ित)\s*[:\-]\s*([^\n\r]+)"],
+    "accused": [r"(?:accused|ಆರೋಪಿ|आरोपी)\s*[:\-]\s*([^\n\r]+)"],
+    "acts": [r"(?:acts?\s*(?:and|&)\s*sections?|sections?|ಕಾಯ್ದೆ\s*ಮತ್ತು\s*ಕಲಂಗಳು|धारा)\s*[:\-]\s*([^\n\r]+)"],
+}
+
+
+def extract_fir_fields(text):
+    """Assistive, deterministic extraction. Every value remains unverified until officer submission."""
+    clean = unicodedata.normalize("NFKC", text or "").replace("\u00a0", " ")
+    fields, evidence = {}, {}
+    for field, patterns in FIELD_PATTERNS.items():
+        for pattern in patterns:
+            match = re.search(pattern, clean, flags=re.IGNORECASE)
+            if match:
+                value = re.sub(r"\s+", " ", match.group(1)).strip(" .;,")
+                if field == "gravity":
+                    value = "Non-Heinous" if re.search(r"non|ಅಘೋರ|गैर", value, re.I) else "Heinous"
+                fields[field] = value
+                evidence[field] = match.group(0).strip()
+                break
+    required = ("title", "major", "minor", "gravity", "station", "district", "incident_date", "incident_time", "location", "complainant", "acts")
+    if fields.get("incident_date"):
+        fields["incident_date"] = normalized_form_date(fields["incident_date"])
+    if fields.get("incident_time"):
+        fields["incident_time"] = normalized_form_time(fields["incident_time"])
+    missing = [field for field in required if not fields.get(field)]
+    confidence = round(100 * len(fields) / len(FIELD_PATTERNS))
+    return {"language": detect_language(clean), "fields": fields, "evidence": evidence, "missing": missing, "confidence": confidence, "requires_officer_verification": True}
+
+
+def normalize_person_name(name):
+    value = unicodedata.normalize("NFKD", name or "").casefold()
+    value = re.sub(r"\b(?:mr|mrs|ms|sri|smt|shri|dr|unknown|accused)\.?\b", " ", value)
+    return " ".join(re.findall(r"[^\W\d_]+", value, flags=re.UNICODE))
+
+
+def person_name_score(left, right):
+    a, b = normalize_person_name(left), normalize_person_name(right)
+    if not a or not b:
+        return 0
+    if a == b:
+        return 100
+    a_tokens, b_tokens = set(a.split()), set(b.split())
+    token_score = len(a_tokens & b_tokens) / max(1, len(a_tokens | b_tokens))
+    sequence_score = SequenceMatcher(None, a, b).ratio()
+    initial_match = a.split()[0][0] == b.split()[0][0] and a.split()[-1] == b.split()[-1]
+    return round(100 * max(token_score, sequence_score, .88 if initial_match else 0))
+
+
+def resolve_accused(db, name):
+    candidates = db.execute("SELECT id,canonical_name FROM accused").fetchall()
+    scored = sorted(((person_name_score(name, row["canonical_name"]), row) for row in candidates), key=lambda item: item[0], reverse=True)
+    if scored and scored[0][0] >= 88:
+        return scored[0][1]["id"], scored[0][1]["canonical_name"], scored[0][0]
+    identity_key = normalize_person_name(name).replace(" ", "") or re.sub(r"\W+", "", name.casefold())
+    db.execute("INSERT OR IGNORE INTO accused(canonical_name,identity_key) VALUES (?,?)", (name, identity_key))
+    row = db.execute("SELECT id,canonical_name FROM accused WHERE identity_key=?", (identity_key,)).fetchone()
+    return row["id"], row["canonical_name"], 100
+
+
 def extract_document(upload):
     if not upload or not upload.filename:
         return "", None
@@ -251,6 +374,26 @@ def extract_document(upload):
         reader = PdfReader(upload.stream)
         return "\n".join(page.extract_text() or "" for page in reader.pages), filename
     raise ValueError("Only UTF-8 text and searchable PDF files are supported.")
+
+
+def normalized_form_date(value):
+    value = (value or "").strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return value
+
+
+def normalized_form_time(value):
+    value = (value or "").strip().replace(".", ":")
+    for fmt in ("%H:%M", "%I:%M %p"):
+        try:
+            return datetime.strptime(value.upper(), fmt).strftime("%H:%M")
+        except ValueError:
+            continue
+    return value
 
 
 @app.context_processor
@@ -324,43 +467,64 @@ def new_fir():
             narrative = request.form.get("brief_facts", "").strip() or extracted_text.strip()
             if not narrative:
                 raise ValueError("Enter the FIR narrative or upload a document containing searchable text.")
+            extraction = extract_fir_fields(narrative)
+            def submitted(field, default=""):
+                return request.form.get(field, "").strip() or extraction["fields"].get(field, default)
             required_fields = {
                 "title": "Case title", "major": "Major crime head", "minor": "Minor crime head", "gravity": "Gravity",
                 "station": "Police station", "district": "District", "incident_date": "Incident date",
                 "incident_time": "Incident time", "location": "Location", "complainant": "Complainant",
                 "acts": "Acts and sections",
             }
-            missing = [label for field, label in required_fields.items() if not request.form.get(field, "").strip()]
+            missing = [label for field, label in required_fields.items() if not submitted(field)]
             if missing:
                 raise ValueError("Complete the required fields: " + ", ".join(missing) + ".")
-            detected_language = detect_language(narrative)
+            detected_language = extraction["language"]
             with get_db() as db:
                 next_id = db.execute("SELECT COALESCE(MAX(id),0)+1 FROM cases").fetchone()[0]
-                case_no = request.form.get("case_no", "").strip() or f"{datetime.now().year}{next_id:05d}"
-                crime_no = request.form.get("crime_no", "").strip() or f"1{443:04d}{6:04d}{datetime.now().year}{next_id:05d}"
+                case_no = submitted("case_no") or f"{datetime.now().year}{next_id:05d}"
+                crime_no = submitted("crime_no") or f"1{443:04d}{6:04d}{datetime.now().year}{next_id:05d}"
                 db.execute("""INSERT INTO cases(id,crime_no,case_no,title,category,major_head,minor_head,status,gravity,station,district,incident_date,incident_time,location,latitude,longitude,officer,complainant,victim,brief_facts,risk_score,source_language,source_document)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                    next_id, crime_no, case_no, request.form.get("title", "Untitled FIR").strip(), "FIR",
-                    request.form.get("major", "Other").strip(), request.form.get("minor", "Other").strip(), "Under Investigation",
-                    request.form.get("gravity", "Non-Heinous"), request.form.get("station", current_user()["unit"]).strip(),
-                    request.form.get("district", "Bengaluru Urban").strip(), request.form.get("incident_date") or datetime.now().strftime("%d %b %Y"),
-                    request.form.get("incident_time") or datetime.now().strftime("%H:%M"), request.form.get("location", "Location pending verification").strip(),
+                    next_id, crime_no, case_no, submitted("title", "Untitled FIR"), "FIR",
+                    submitted("major", "Other"), submitted("minor", "Other"), "Under Investigation",
+                    submitted("gravity", "Non-Heinous"), submitted("station", current_user()["unit"]),
+                    submitted("district", "Bengaluru Urban"), normalized_form_date(submitted("incident_date")) or datetime.now().strftime("%Y-%m-%d"),
+                    normalized_form_time(submitted("incident_time")) or datetime.now().strftime("%H:%M"), submitted("location", "Location pending verification"),
                     float(request.form.get("latitude") or 0), float(request.form.get("longitude") or 0), current_user()["name"],
-                    request.form.get("complainant", "").strip(), request.form.get("victim", "").strip(), narrative,
+                    submitted("complainant"), submitted("victim"), narrative,
                     int(request.form.get("risk_score") or 0), detected_language, source_document,
                 ))
-                for order, name in enumerate(filter(None, (part.strip() for part in request.form.get("accused", "").split(","))), 1):
-                    identity_key = "".join(char for char in name.lower() if char.isalnum())
-                    db.execute("INSERT OR IGNORE INTO accused(canonical_name,identity_key) VALUES (?,?)", (name, identity_key))
-                    accused_id = db.execute("SELECT id FROM accused WHERE identity_key=?", (identity_key,)).fetchone()[0]
+                for order, name in enumerate(filter(None, (part.strip() for part in submitted("accused").split(","))), 1):
+                    accused_id, canonical_name, match_score = resolve_accused(db, name)
                     db.execute("INSERT INTO case_accused VALUES (?,?,?)", (next_id, accused_id, order))
-                for act in filter(None, (part.strip() for part in request.form.get("acts", "").split(","))):
+                for act in filter(None, (part.strip() for part in submitted("acts").split(","))):
                     db.execute("INSERT INTO case_acts VALUES (?,?)", (next_id, act))
+                db.execute("""INSERT INTO fir_extractions(case_id,source_document,source_language,extraction_confidence,missing_fields,verified_by,created_at)
+                    VALUES (?,?,?,?,?,?,?)""", (next_id, source_document, detected_language, extraction["confidence"], ",".join(extraction["missing"]), current_user()["id"], datetime.now().isoformat(timespec="seconds")))
             audit("CREATE", "FIR", f"{crime_no} · {detected_language} · {source_document or 'manual entry'}")
             return redirect(url_for("case_board", case_id=next_id))
         except (ValueError, sqlite3.IntegrityError) as exc:
             error = str(exc)
     return render_template("fir_form.html", error=error, extracted_text=extracted_text, detected_language=detected_language)
+
+
+@app.post("/api/fir/extract")
+@login_required
+def preview_fir_extraction():
+    if current_user()["role"] not in {"investigator", "analyst"}:
+        return jsonify({"error": "Forbidden"}), 403
+    try:
+        text, filename = extract_document(request.files.get("fir_document"))
+        text = request.form.get("brief_facts", "").strip() or text
+        if not text.strip():
+            return jsonify({"error": "Upload a searchable PDF/TXT file or enter an FIR narrative."}), 400
+        result = extract_fir_fields(text)
+        result.update({"source_document": filename, "text": text})
+        audit("EXTRACT_PREVIEW", "FIR", f"{filename or 'narrative'} · {result['language']} · {result['confidence']}%")
+        return jsonify(result)
+    except (ValueError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/dashboard")
@@ -397,10 +561,10 @@ def ask_case(case_id):
     linked = linked_cases(case_id)
     if any(term in normalized for term in ["other case", "repeat", "linked", "history", "ಹಿಂದಿನ"]):
         if linked:
-            names = ", ".join(f"FIR {item['case_no']} ({item['minor']})" for item in linked)
-            answer = f"Verified cross-case match found: {case['accused'][0]} appears in {names}. Treat this as an investigative lead pending identity confirmation."
-            evidence = [{"table": "Accused", "field": "AccusedName", "value": case["accused"][0], "record": f"CaseMasterID {item['id']}"} for item in linked]
-            confidence = 86
+            names = ", ".join(f"FIR {item['case_no']} ({item['link_score']}% link score)" for item in linked[:4])
+            answer = f"Explainable cross-case leads found: {names}. Scores combine accused-name similarity, crime sub-head, distance and time window; identity must still be confirmed by an investigator."
+            evidence = [{**entry, "record": f"FIR {item['case_no']} · {'; '.join(item['link_reasons'])}"} for item in linked[:4] for entry in item["link_evidence"]]
+            confidence = linked[0]["link_score"]
             kind = "Analytical lead"
         else:
             answer, evidence, confidence, kind = "No linked case was found in the current authorised dataset.", [{"table": "Accused", "field": "CaseMasterID", "value": str(case_id), "record": "Current case"}], 100, "Verified fact"
@@ -417,7 +581,7 @@ def ask_case(case_id):
         evidence = [{"table": "CaseMaster", "field": "BriefFacts", "value": case["brief"], "record": case["crime_no"]}, {"table": "CaseStatusMaster", "field": "CaseStatusName", "value": case["status"], "record": case["crime_no"]}]
         confidence, kind = 100, "Verified fact"
     audit("AI_QUERY", "CASE", f"{case['crime_no']} · {question[:80]}")
-    return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "minor": item["minor"]} for item in linked]})
+    return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "minor": item["minor"], "score": item["link_score"], "reasons": item["link_reasons"]} for item in linked]})
 
 
 @app.post("/api/case/<int:case_id>/expand")

@@ -33,3 +33,11 @@ Password: demo123
 ```
 
 The local SQLite database is generated automatically and is excluded from Git. Replace the development secret and demo authentication before deployment.
+
+## ER-aligned FIR extraction
+
+The intake screen provides `Extract fields for review` for searchable PDF and UTF-8 TXT sources. It maps labels to CaseMaster, ComplainantDetails, Victim, Accused, and ActSectionAssociation fields while preserving the original narrative. Language, extraction coverage, missing fields, source document, and verifying officer are recorded in `fir_extractions`.
+
+Extraction is assistive: suggested fields remain visually marked until an officer verifies and submits them. Conservative person-name resolution can connect variants such as `R. Naik` and `Ravi Naik` without training a custom model.
+
+Anonymised English, Kannada, and Hindi examples are available under `samples/`.
