@@ -199,10 +199,10 @@ def board_payload(case):
 
     dense = len(case["accused"]) > 8
     nodes = [
-        {"id": f"case-{case['id']}", "type": "case", "signal": "normal", "label": f"FIR {case['case_no']}", "meta": case["minor"], "value": str(case["id"]), "x": 50, "y": 45},
-        {"id": f"place-{case['id']}", "type": "location", "signal": signal_level(nearby_count, 2, 4), "label": case["location"], "meta": f"{nearby_count} FIRs within 5 km · click to explore", "value": str(case["id"]), "x": 19, "y": 22},
-        {"id": f"offence-{case['id']}", "type": "offence", "signal": signal_level(offence_count, 2, 4), "label": case["minor"], "meta": f"{offence_count} recorded FIRs · click to explore", "value": case["minor"], "x": 50, "y": 82},
-        {"id": f"victim-{case['id']}", "type": "victim", "signal": signal_level(person_count, 2, 3), "label": case["victim"], "meta": f"{person_count} linked FIR · victim / complainant", "value": case["victim"], "x": 18, "y": 70},
+        {"id": f"case-{case['id']}", "type": "case", "signal": "normal", "has_connections": False, "label": f"FIR {case['case_no']}", "meta": case["minor"], "value": str(case["id"]), "x": 50, "y": 45},
+        {"id": f"place-{case['id']}", "type": "location", "signal": signal_level(nearby_count, 2, 4), "has_connections": nearby_count > 1, "label": case["location"], "meta": f"{nearby_count} FIRs within 5 km", "value": str(case["id"]), "x": 19, "y": 22},
+        {"id": f"offence-{case['id']}", "type": "offence", "signal": signal_level(offence_count, 2, 4), "has_connections": offence_count > 1, "label": case["minor"], "meta": f"{offence_count} recorded FIRs", "value": case["minor"], "x": 50, "y": 82},
+        {"id": f"victim-{case['id']}", "type": "victim", "signal": signal_level(person_count, 2, 3), "has_connections": person_count > 1, "label": case["victim"], "meta": f"{person_count} linked FIR · victim / complainant", "value": case["victim"], "x": 18, "y": 70},
     ]
     edges = [
         {"from": f"case-{case['id']}", "to": f"place-{case['id']}", "label": "occurred at"},
@@ -217,7 +217,7 @@ def board_payload(case):
         node_id = f"accused-{case['id']}-{index}"
         count = accused_counts[accused]
         position = positions[index % len(positions)]
-        nodes.append({"id": node_id, "type": "accused", "signal": signal_level(count, 2, 3), "dense": dense, "compact": index < 6, "label": accused, "meta": f"A{index + 1} · {count} linked FIR{'s' if count != 1 else ''} · click to trace", "value": accused, "x": position[0], "y": position[1]})
+        nodes.append({"id": node_id, "type": "accused", "signal": signal_level(count, 2, 3), "has_connections": count > 1, "dense": dense, "compact": index < 6, "label": accused, "meta": f"A{index + 1} · {count} linked FIR{'s' if count != 1 else ''}", "value": accused, "x": position[0], "y": position[1]})
         edges.append({"from": f"case-{case['id']}", "to": node_id, "label": "accused in", "compact": index < 6})
     return {"nodes": nodes, "edges": edges, "dense": dense}
 
