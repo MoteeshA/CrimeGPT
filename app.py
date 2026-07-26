@@ -785,7 +785,7 @@ def logout():
     audit("LOGOUT", "AUTH")
     session.clear()
     if catalyst_auth_enabled():
-        return render_template("catalyst_logout.html", login_url=url_for("login", _external=True))
+        return render_template("catalyst_logout.html", login_url=url_for("login", _external=True, _scheme="https"))
     return redirect(url_for("login"))
 
 
