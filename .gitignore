@@ -5,3 +5,4 @@ __pycache__/
 *.db
 .env
 CrimeGPT-AppSail.zip
+appsail_build/
