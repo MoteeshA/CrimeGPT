@@ -433,6 +433,18 @@
             cursor: pointer;
         }
 
+        .safari-auth-note {
+            display: none;
+            margin: 20px 0 0;
+            padding: 18px;
+            border: 1px solid #d9e2ec;
+            border-radius: 12px;
+            color: var(--muted);
+            background: #f8fafc;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
         .notice svg {
             width: 17px;
             height: 17px;
@@ -573,6 +585,7 @@
                     <div class="auth-loading">Loading secure department sign-in…</div>
                 </div>
                 <button id="auth-fallback" class="auth-fallback" type="button">Continue to secure sign-in</button>
+                <p id="safari-auth-note" class="safari-auth-note">Safari opens the verified Catalyst credential step securely, then returns you directly to the CrimeGPT investigation workspace.</p>
                 {% else %}
                 <form action="{{ url_for('login') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <div class="field">
@@ -646,7 +659,9 @@
             if (!frame || !frame.src) return;
             window.clearInterval(iframeReady);
             if (isSafari) {
-                openCatalystSignIn();
+                document.querySelector('#catalyst-login').style.display = 'none';
+                document.querySelector('#safari-auth-note').style.display = 'block';
+                fallbackButton.style.display = 'block';
             } else {
                 fallbackButton.style.display = 'block';
             }
