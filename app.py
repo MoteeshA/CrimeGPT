@@ -303,6 +303,9 @@ def catalyst_auth_enabled():
 
 
 def catalyst_current_user():
+    cached_identity = session.get("catalyst_identity")
+    if cached_identity:
+        return cached_identity
     if getattr(g, "_catalyst_identity_checked", False):
         return getattr(g, "_catalyst_identity", None)
     g._catalyst_identity_checked = True
@@ -332,6 +335,7 @@ def catalyst_current_user():
             "unit": "Karnataka State Police",
             "auth_source": "catalyst",
         }
+        session["catalyst_identity"] = g._catalyst_identity
         return g._catalyst_identity
     except Exception as exc:
         app.logger.info("No authenticated Catalyst end-user for %s: %s", request.path, exc)
@@ -455,10 +459,11 @@ def audit(action, resource, detail=""):
         event = {"occurred_at": occurred_at, "officer_id": user["id"], "role": user["role"], "action": action, "resource": resource, "detail": detail}
         with get_db() as db:
             db.execute("INSERT INTO audit_log(occurred_at,officer_id,role,action,resource,detail) VALUES (?,?,?,?,?,?)", tuple(event.values()))
-        try:
-            cloud_upsert("AuditEvents", f"{occurred_at}:{secrets.token_hex(4)}", event)
-        except Exception:
-            app.logger.exception("Could not mirror audit event to Catalyst")
+        if os.environ.get("SYNC_AUDIT_TO_CLOUD", "").lower() in {"1", "true", "yes"}:
+            try:
+                cloud_upsert("AuditEvents", f"{occurred_at}:{secrets.token_hex(4)}", event)
+            except Exception:
+                app.logger.exception("Could not mirror audit event to Catalyst")
 
 
 def active_conversation(case_id, create=True):
