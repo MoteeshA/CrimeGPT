@@ -446,6 +446,9 @@ def current_user():
     cloud_user = catalyst_current_user()
     if cloud_user:
         return cloud_user
+    demo_identity = session.get("demo_identity")
+    if demo_identity:
+        return demo_identity
     if catalyst_auth_enabled():
         return None
     officer_id = session.get("officer_id")
@@ -518,7 +521,7 @@ def secure_response(response):
         "style-src 'self' 'unsafe-inline'; "
         "script-src 'self' 'unsafe-inline' https://static.zohocdn.com; "
         "worker-src 'self' blob:; "
-        "img-src 'self' data: https://tile.openstreetmap.org; "
+        "img-src 'self' data: https://tile.openstreetmap.org https://*.basemaps.cartocdn.com; "
         "connect-src 'self' https://tile.openstreetmap.org; "
         "font-src 'self'; frame-ancestors 'none'",
     )
@@ -974,6 +977,20 @@ def inject_globals():
 
 @app.route("/", methods=["GET", "POST"])
 def login():
+    if request.method == "POST":
+        officer_id = request.form.get("officer_id", "").strip().upper()
+        password = request.form.get("password", "")
+        if officer_id == "DEMO" and password == "DEMO":
+            session.clear()
+            session["demo_identity"] = {
+                "id": "DEMO", "name": "CrimeGPT Demo", "role": "investigator",
+                "rank": "Demonstration Investigator", "unit": "KSP Datathon Demo Workspace",
+                "auth_source": "demo",
+            }
+            session["csrf_token"] = secrets.token_urlsafe(32)
+            session.permanent = False
+            audit("LOGIN", "AUTH", "Restricted demonstration login")
+            return redirect(url_for("workspace"))
     if catalyst_auth_enabled():
         return render_template("login.html", error=None, catalyst_auth=True)
     if current_user() and request.method == "GET":

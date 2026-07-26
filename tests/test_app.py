@@ -89,6 +89,13 @@ class CrimeGPTTests(unittest.TestCase):
         self.assertIn("https://static.zohocdn.com", response.headers["Content-Security-Policy"])
         self.assertIn("worker-src 'self' blob:", response.headers["Content-Security-Policy"])
         self.assertIn("https://tile.openstreetmap.org", response.headers["Content-Security-Policy"])
+        self.assertIn("https://*.basemaps.cartocdn.com", response.headers["Content-Security-Policy"])
+
+    def test_restricted_demo_login(self):
+        response = self.client.post("/", data={"officer_id": "DEMO", "password": "DEMO"})
+        self.assertEqual(response.status_code, 302)
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["demo_identity"]["role"], "investigator")
 
     def test_catalyst_logout_uses_web_sdk(self):
         os.environ["CATALYST_AUTH_ENABLED"] = "1"

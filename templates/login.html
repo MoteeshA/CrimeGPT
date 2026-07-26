@@ -586,6 +586,8 @@
                 </div>
                 <button id="auth-fallback" class="auth-fallback" type="button">Continue to secure sign-in</button>
                 <p id="safari-auth-note" class="safari-auth-note">Safari opens the verified Catalyst credential step securely, then returns you directly to the CrimeGPT investigation workspace.</p>
+                <form action="{{ url_for('login') }}" method="post" style="margin-top:16px"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="officer_id" value="DEMO"><input type="hidden" name="password" value="DEMO"><button class="sign-in" type="submit" style="background:#eef5f8;color:#123b59;border:1px solid #cbdce6">Enter demonstration workspace</button></form>
+                <p class="demo-access">Demo credentials: DEMO / DEMO</p>
                 {% else %}
                 <form action="{{ url_for('login') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <div class="field">
@@ -627,7 +629,7 @@
                     <button class="sign-in" type="submit">Sign in securely</button>
                 </form>
 
-                <p class="demo-access">Demo access: INV001 / demo123</p>
+                <p class="demo-access">Demo access: DEMO / DEMO</p>
                 {% endif %}
 
                 <div class="notice">
