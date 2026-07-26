@@ -21,6 +21,7 @@ from math import asin, cos, radians, sin, sqrt
 from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for, send_file
 from werkzeug.security import check_password_hash, generate_password_hash
 from pypdf import PdfReader
+from intelligence_engine import CatalystQuickMLEngine, classify_query
 
 
 app = Flask(__name__)
@@ -860,40 +861,32 @@ def import_cctns_records(records, source_name, officer_id):
     return accepted, errors, imported_ids
 
 
+def all_case_records():
+    with get_db() as db:
+        return [case_from_row(row, db) for row in db.execute("SELECT * FROM cases ORDER BY incident_date DESC").fetchall()]
+
+
+def quickml_audit(action, resource, detail):
+    audit(action, resource, detail)
+
+
 def grounded_ai_answer(question, case, linked, history):
-    """Call an optional private model endpoint with only authorised case context."""
-    endpoint = os.environ.get("AI_ENDPOINT_URL", "").strip()
-    if not endpoint:
+    """Use only Catalyst QuickML; return None for the deterministic safe fallback."""
+    result = CatalystQuickMLEngine().answer(
+        question, all_case_records(), current_user(), base_case_id=case["id"],
+        history=[{"role": item["role"], "content": item["content"]} for item in history[-6:]],
+        audit_callback=quickml_audit,
+    )
+    if not result:
         return None
-    evidence_catalog = [
-        {"id": "case_brief", "table": "CaseMaster", "field": "BriefFacts", "value": case["brief"], "record": case["crime_no"]},
-        {"id": "case_location", "table": "CaseMaster", "field": "Location", "value": f"{case['location']} · {case['date']} {case['time']}", "record": case["crime_no"]},
-        {"id": "case_sections", "table": "ActSectionAssociation", "field": "ActID / SectionID", "value": ", ".join(case["acts"]), "record": case["crime_no"]},
-    ]
-    for item in linked[:6]:
-        evidence_catalog.append({"id": f"linked_{item['id']}", "table": "CaseRelationships", "field": "LinkScore", "value": f"{item['link_score']}% · {'; '.join(item['link_reasons'])}", "record": item["crime_no"]})
-    prompt = {
-        "instruction": "Answer the investigator using only the evidence catalog. Never invent a fact. Reply in the question's language (English or Kannada). Return strict JSON with answer, kind, confidence, and evidence_ids.",
-        "question": question,
-        "recent_context": [{"role": item["role"], "content": item["content"]} for item in history[-6:]],
-        "evidence_catalog": evidence_catalog,
-    }
-    headers = {"Content-Type": "application/json"}
-    if os.environ.get("AI_API_KEY"):
-        headers["Authorization"] = f"Bearer {os.environ['AI_API_KEY']}"
-    try:
-        response = urlopen(Request(endpoint, data=json.dumps(prompt, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST"), timeout=20)
-        result = json.loads(response.read().decode("utf-8"))
-        if isinstance(result.get("output"), str):
-            result = json.loads(result["output"])
-        selected = [item for item in evidence_catalog if item["id"] in result.get("evidence_ids", [])]
-        if not result.get("answer") or not selected:
-            raise ValueError("The model response was not evidence-grounded")
-        evidence = [{key: value for key, value in item.items() if key != "id"} for item in selected]
-        return {"answer": str(result["answer"]), "kind": result.get("kind", "AI-assisted analysis"), "confidence": max(0, min(int(result.get("confidence", 70)), 100)), "evidence": evidence}
-    except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        app.logger.warning("AI endpoint unavailable or invalid; using deterministic engine: %s", exc)
-        return None
+    evidence = []
+    for item in result["evidence"]:
+        evidence.append({
+            "table": "QuickMLRAG", "field": "RetrievedRecord",
+            "value": f"{item.get('title') or item.get('offence')} · {item.get('location')} · {item.get('date')}",
+            "record": item["evidence_id"],
+        })
+    return {**result, "evidence": evidence}
 
 
 @app.context_processor
@@ -1186,7 +1179,7 @@ def ask_case(case_id):
     context_text = f"{previous_user_question} {question}".lower() if english_context_reference or kannada_context_reference else normalized
     linked = linked_cases(case_id)
     ai_result = grounded_ai_answer(question, case, linked, history)
-    engine = "grounded-model" if ai_result else "deterministic-evidence-engine"
+    engine = ai_result.get("engine", "catalyst-quickml") if ai_result else "deterministic-evidence-engine"
     if ai_result:
         answer, evidence, confidence, kind = ai_result["answer"], ai_result["evidence"], ai_result["confidence"], ai_result["kind"]
     elif any(term in normalized for term in ["where", "when", "location", "place", "ಎಲ್ಲಿ", "ಯಾವಾಗ"]):
@@ -1213,6 +1206,44 @@ def ask_case(case_id):
     audit("AI_QUERY", "CASE", f"{case['crime_no']} · {question[:80]}")
     store_message(conversation["id"], "assistant", answer, question_language, kind, confidence, evidence)
     return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "engine": engine, "conversation_id": conversation["id"], "context_used": bool(previous_user_question and context_text != normalized), "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "minor": item["minor"], "score": item["link_score"], "reasons": item["link_reasons"]} for item in linked]})
+
+
+@app.post("/api/analytics/ask")
+@roles_required("investigator", "analyst", "supervisor", "policymaker")
+def ask_analytics():
+    """Cross-case natural-language analytics through role-scoped QuickML retrieval."""
+    question = (request.get_json(silent=True) or {}).get("question", "").strip()
+    if not question:
+        return jsonify({"error": "Question is required"}), 400
+    result = CatalystQuickMLEngine().answer(
+        question, all_case_records(), current_user(), audit_callback=quickml_audit,
+    )
+    if not result:
+        return jsonify({
+            "error": "Catalyst QuickML LLM Serving is not configured or returned an ungrounded response.",
+            "intent": classify_query(question), "engine": "unavailable",
+        }), 503
+    audit("AI_ANALYTICS", "AUTHORISED_CASE_SCOPE", f"intent={result['intent']} evidence={','.join(result['evidence_ids'])}")
+    return jsonify(result)
+
+
+@app.get("/api/case/<int:case_id>/risk-explanation")
+@roles_required("investigator", "analyst", "supervisor")
+def risk_explanation(case_id):
+    """Keep the stored score locked; QuickML only phrases active-factor evidence."""
+    case = find_case(case_id)
+    if not case:
+        return jsonify({"error": "Case not found"}), 404
+    if int(case.get("risk", -1)) < 0:
+        result = CatalystQuickMLEngine().explain_risk(case, {}, {}, current_user(), quickml_audit)
+        return jsonify(result)
+    with get_db() as db:
+        _score, _features, contributions = explainable_risk(case, db)
+    active = {name: points for name, points in contributions.items() if points > 0}
+    evidence_rows = {name: [case["crime_no"]] for name in active}
+    result = CatalystQuickMLEngine().explain_risk(case, active, evidence_rows, current_user(), quickml_audit)
+    audit("RISK_EXPLANATION", "CASE", f"{case['crime_no']} engine={result['engine']}")
+    return jsonify(result)
 
 
 @app.post("/api/case/<int:case_id>/expand")
