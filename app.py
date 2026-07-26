@@ -18,7 +18,13 @@ from pypdf import PdfReader
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "local-development-key-change-in-production")
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
-DB_PATH = Path(__file__).with_name("ksp_intelligence.db")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+    SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE") == "1",
+    PERMANENT_SESSION_LIFETIME=1800,
+)
+DB_PATH = Path(os.environ.get("DATABASE_PATH", Path(__file__).with_name("ksp_intelligence.db")))
 
 
 USERS = {
@@ -193,6 +199,22 @@ def login_required(view):
             return redirect(url_for("login"))
         return view(*args, **kwargs)
     return wrapped
+
+
+def roles_required(*allowed_roles):
+    def decorator(view):
+        @wraps(view)
+        @login_required
+        def wrapped(*args, **kwargs):
+            user = current_user()
+            if user["role"] not in allowed_roles:
+                audit("ACCESS_DENIED", request.path, f"required={','.join(allowed_roles)}")
+                if request.path.startswith("/api/"):
+                    return jsonify({"error": "Forbidden"}), 403
+                return "Forbidden", 403
+            return view(*args, **kwargs)
+        return wrapped
+    return decorator
 
 
 def audit(action, resource, detail=""):
@@ -387,7 +409,14 @@ def normalize_person_name(name):
     return " ".join(re.findall(r"[^\W\d_]+", value, flags=re.UNICODE))
 
 
+def is_placeholder_identity(name):
+    value = unicodedata.normalize("NFKC", name or "").casefold().strip()
+    return bool(re.fullmatch(r"(?:unknown|unidentified|not\s+known|ತಿಳಿಯದ|ಅಪರಿಚಿತ|अज्ञात)(?:\s+(?:accused|person|suspect))?\s*[a-z]*\d*", value))
+
+
 def person_name_score(left, right):
+    if is_placeholder_identity(left) or is_placeholder_identity(right):
+        return 0
     a, b = normalize_person_name(left), normalize_person_name(right)
     if not a or not b:
         return 0
@@ -401,6 +430,11 @@ def person_name_score(left, right):
 
 
 def resolve_accused(db, name):
+    if is_placeholder_identity(name):
+        identity_key = "placeholder-" + re.sub(r"\W+", "", unicodedata.normalize("NFKC", name).casefold())
+        db.execute("INSERT OR IGNORE INTO accused(canonical_name,identity_key) VALUES (?,?)", (name, identity_key))
+        row = db.execute("SELECT id,canonical_name FROM accused WHERE identity_key=?", (identity_key,)).fetchone()
+        return row["id"], row["canonical_name"], 0
     candidates = db.execute("SELECT id,canonical_name FROM accused").fetchall()
     scored = sorted(((person_name_score(name, row["canonical_name"]), row) for row in candidates), key=lambda item: item[0], reverse=True)
     if scored and scored[0][0] >= 88:
