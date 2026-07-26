@@ -74,6 +74,8 @@ class CrimeGPTTests(unittest.TestCase):
         response = self.client.get("/logout")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"catalyst.auth.signOut", response.data)
+        self.assertIn(b"http://localhost/", response.data)
+        self.assertNotIn(b"catalystserverless.in", response.data)
         os.environ["CATALYST_AUTH_ENABLED"] = "0"
 
     def test_policymaker_cannot_ingest_or_query_cases(self):
