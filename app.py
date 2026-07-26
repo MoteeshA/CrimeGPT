@@ -466,6 +466,12 @@ def active_conversation(case_id, create=True):
     if not user:
         return None
     with get_db() as db:
+        if user.get("auth_source") == "catalyst":
+            db.execute(
+                """INSERT OR IGNORE INTO users(officer_id,password_hash,name,role,rank_name,unit_name,active)
+                   VALUES (?,?,?,?,?,?,1)""",
+                (user["id"], "CATALYST_MANAGED", user["name"], user["role"], user["rank"], user["unit"]),
+            )
         row = db.execute("SELECT * FROM conversations WHERE case_id=? AND officer_id=? ORDER BY updated_at DESC LIMIT 1", (case_id, user["id"])).fetchone()
         if not row and create:
             now = datetime.now().isoformat(timespec="seconds")
