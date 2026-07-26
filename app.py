@@ -34,6 +34,10 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime
 DB_PATH = Path(os.environ.get("DATABASE_PATH", Path(__file__).with_name("ksp_intelligence.db")))
 CLOUD_SYNC_LOCK = threading.Lock()
 CLOUD_HYDRATED = False
+CATALYST_HOSTED_LOGIN_URL = os.environ.get(
+    "CATALYST_HOSTED_LOGIN_URL",
+    "https://crimegpt-60080077164.development.catalystserverless.in/__catalyst/auth/login",
+).strip()
 
 
 USERS = {
@@ -291,7 +295,49 @@ def hydrate_cases_from_cloud():
         app.logger.info("Hydrated %s CaseMaster records from Catalyst Data Store", len(rows))
 
 
+def catalyst_auth_enabled():
+    """Use Catalyst identities in AppSail; retain demo accounts only for local development/tests."""
+    configured = os.environ.get("CATALYST_AUTH_ENABLED")
+    return catalyst_enabled() if configured is None else configured.lower() in {"1", "true", "yes"}
+
+
+def catalyst_current_user():
+    if not catalyst_auth_enabled() or not catalyst_enabled():
+        return None
+    try:
+        identity = catalyst_app().authentication().get_current_user()
+        if not identity or str(identity.get("status", "")).upper() not in {"ACTIVE", ""}:
+            return None
+        role_name = str((identity.get("role_details") or {}).get("role_name", "App User")).lower()
+        role = {
+            "app administrator": "supervisor",
+            "investigator": "investigator",
+            "analyst": "analyst",
+            "supervisor": "supervisor",
+            "policymaker": "policymaker",
+            "app user": "investigator",
+        }.get(role_name, "investigator")
+        name = " ".join(filter(None, [identity.get("first_name"), identity.get("last_name")])).strip()
+        return {
+            "id": str(identity.get("user_id") or identity.get("zuid") or identity.get("email_id")),
+            "name": name or identity.get("email_id") or "Authorised user",
+            "email": identity.get("email_id"),
+            "role": role,
+            "rank": (identity.get("role_details") or {}).get("role_name", "App User"),
+            "unit": "Karnataka State Police",
+            "auth_source": "catalyst",
+        }
+    except Exception as exc:
+        app.logger.info("No authenticated Catalyst end-user for %s: %s", request.path, exc)
+        return None
+
+
 def current_user():
+    cloud_user = catalyst_current_user()
+    if cloud_user:
+        return cloud_user
+    if catalyst_auth_enabled():
+        return None
     officer_id = session.get("officer_id")
     if not officer_id:
         return None
@@ -306,6 +352,8 @@ def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         if not current_user():
+            if catalyst_auth_enabled() and CATALYST_HOSTED_LOGIN_URL:
+                return redirect(CATALYST_HOSTED_LOGIN_URL)
             return redirect(url_for("login"))
         return view(*args, **kwargs)
     return wrapped
@@ -710,6 +758,11 @@ def inject_globals():
 
 @app.route("/", methods=["GET", "POST"])
 def login():
+    if catalyst_auth_enabled():
+        user = current_user()
+        if user:
+            return redirect(url_for("workspace"))
+        return redirect(CATALYST_HOSTED_LOGIN_URL)
     if current_user() and request.method == "GET":
         return redirect(url_for("workspace"))
     error = None
@@ -733,6 +786,10 @@ def login():
 def logout():
     audit("LOGOUT", "AUTH")
     session.clear()
+    if catalyst_auth_enabled():
+        # Catalyst owns the authentication cookie. Its hosted login page safely
+        # handles the next sign-in; a full sign-out is exposed by the Web SDK.
+        return render_template("catalyst_logout.html", login_url=CATALYST_HOSTED_LOGIN_URL)
     return redirect(url_for("login"))
 
 

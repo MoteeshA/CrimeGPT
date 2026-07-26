@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 import app as crimegpt
@@ -10,10 +11,16 @@ class CrimeGPTTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         crimegpt.DB_PATH = Path(self.tempdir.name) / "test.db"
         crimegpt.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        self.auth_setting = os.environ.get("CATALYST_AUTH_ENABLED")
+        os.environ["CATALYST_AUTH_ENABLED"] = "0"
         crimegpt.init_db()
         self.client = crimegpt.app.test_client()
 
     def tearDown(self):
+        if self.auth_setting is None:
+            os.environ.pop("CATALYST_AUTH_ENABLED", None)
+        else:
+            os.environ["CATALYST_AUTH_ENABLED"] = self.auth_setting
         self.tempdir.cleanup()
 
     def login_as(self, officer_id):

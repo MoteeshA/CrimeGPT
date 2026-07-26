@@ -5,7 +5,7 @@ CrimeGPT is a Flask-based crime intelligence prototype for Datathon 2026 Problem
 ## Features
 
 - Catalyst Data Store-backed FIR, conversation, extraction, and audit persistence with a local SQLite query cache
-- Hashed demo authentication with role-aware navigation
+- Catalyst Hosted Authentication with role-aware navigation in AppSail; hashed demo accounts remain local-only
 - Multilingual FIR narrative intake through manual entry, PDF, or TXT upload
 - Searchable case workspace and aggregate intelligence dashboard
 - Interactive, draggable and zoomable investigation graphs
@@ -43,6 +43,8 @@ AppSail initializes the Catalyst Python SDK per request. Set `CATALYST_CLOUD_ENA
 The development project is configured with the `CrimeGPT_FIR_Documents` File Store folder. Override its numeric ID through `DOCUMENT_FOLDER_REF` when deploying this code to another Catalyst project. Without a valid folder, extracted FIR records remain persistent but the original uploaded binary is not copied into File Store.
 
 Set `AI_ENDPOINT_URL` and, when required, `AI_API_KEY` to enable a private generative model. The model must return JSON containing `answer`, `kind`, `confidence`, and `evidence_ids`. Responses without authorised evidence IDs are rejected and the deterministic evidence engine is used instead.
+
+AppSail automatically uses Catalyst Hosted Authentication. Override this with `CATALYST_AUTH_ENABLED=0` only for local development. The hosted login can be changed with `CATALYST_HOSTED_LOGIN_URL`.
 
 ## ER-aligned FIR extraction
 
