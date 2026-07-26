@@ -10,6 +10,7 @@ import json
 import logging
 import secrets
 import threading
+from tempfile import NamedTemporaryFile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape
@@ -105,12 +106,16 @@ def cloud_upsert(table_name, external_id, payload):
 
 
 def cloud_upload(upload, filename):
-    folder_id = os.environ.get("CATALYST_FIR_FOLDER_ID", "").strip()
+    folder_id = os.environ.get("DOCUMENT_FOLDER_REF", "56313000000019211").strip()
     cloud = catalyst_app()
     if not cloud or not folder_id or not upload:
         return None
     upload.stream.seek(0)
-    result = cloud.filestore().folder(folder_id).upload_file(filename, upload.stream)
+    with NamedTemporaryFile() as temporary:
+        temporary.write(upload.stream.read())
+        temporary.flush()
+        with open(temporary.name, "rb") as buffered_file:
+            result = cloud.filestore().folder(folder_id).upload_file(filename, buffered_file)
     upload.stream.seek(0)
     return str(result.get("id") or result.get("file_id") or "") or None
 

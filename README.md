@@ -40,7 +40,7 @@ The local SQLite database is generated automatically and is excluded from Git. R
 
 AppSail initializes the Catalyst Python SDK per request. Set `CATALYST_CLOUD_ENABLED=1` to require Data Store persistence. The application uses `CaseMaster`, `Conversations`, `AuditEvents`, and `FIRExtractions`, each with `ExternalID` and `Payload` columns.
 
-Create a File Store folder and set its numeric ID as `CATALYST_FIR_FOLDER_ID` to retain source documents. Without it, extracted FIR records remain persistent but the original uploaded binary is not copied into File Store.
+The development project is configured with the `CrimeGPT_FIR_Documents` File Store folder. Override its numeric ID through `DOCUMENT_FOLDER_REF` when deploying this code to another Catalyst project. Without a valid folder, extracted FIR records remain persistent but the original uploaded binary is not copied into File Store.
 
 Set `AI_ENDPOINT_URL` and, when required, `AI_API_KEY` to enable a private generative model. The model must return JSON containing `answer`, `kind`, `confidence`, and `evidence_ids`. Responses without authorised evidence IDs are rejected and the deterministic evidence engine is used instead.
 
