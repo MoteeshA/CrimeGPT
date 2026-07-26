@@ -1,18 +1,22 @@
 from datetime import datetime
 from functools import wraps
+from io import BytesIO
 from pathlib import Path
+import os
 import sqlite3
 import re
 import unicodedata
+import json
+from xml.sax.saxutils import escape
 from difflib import SequenceMatcher
 from math import asin, cos, radians, sin, sqrt
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for, send_file
 from werkzeug.security import check_password_hash, generate_password_hash
 from pypdf import PdfReader
 
 
 app = Flask(__name__)
-app.secret_key = "dev-only-change-before-deployment"
+app.secret_key = os.environ.get("SECRET_KEY", "local-development-key-change-in-production")
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 DB_PATH = Path(__file__).with_name("ksp_intelligence.db")
 
@@ -111,6 +115,24 @@ def init_db():
                 verified_by TEXT,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                officer_id TEXT NOT NULL REFERENCES users(officer_id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+                content TEXT NOT NULL,
+                language TEXT NOT NULL,
+                kind TEXT,
+                confidence INTEGER,
+                evidence_json TEXT,
+                created_at TEXT NOT NULL
+            );
         """)
         if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             db.executemany(
@@ -178,6 +200,32 @@ def audit(action, resource, detail=""):
     if user:
         with get_db() as db:
             db.execute("INSERT INTO audit_log(occurred_at,officer_id,role,action,resource,detail) VALUES (?,?,?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), user["id"], user["role"], action, resource, detail))
+
+
+def active_conversation(case_id, create=True):
+    user = current_user()
+    if not user:
+        return None
+    with get_db() as db:
+        row = db.execute("SELECT * FROM conversations WHERE case_id=? AND officer_id=? ORDER BY updated_at DESC LIMIT 1", (case_id, user["id"])).fetchone()
+        if not row and create:
+            now = datetime.now().isoformat(timespec="seconds")
+            cursor = db.execute("INSERT INTO conversations(case_id,officer_id,created_at,updated_at) VALUES (?,?,?,?)", (case_id, user["id"], now, now))
+            row = db.execute("SELECT * FROM conversations WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return dict(row) if row else None
+
+
+def conversation_history(conversation_id):
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM conversation_messages WHERE conversation_id=? ORDER BY id", (conversation_id,)).fetchall()
+    return [{**dict(row), "evidence": json.loads(row["evidence_json"] or "[]")} for row in rows]
+
+
+def store_message(conversation_id, role, content, language, kind=None, confidence=None, evidence=None):
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_db() as db:
+        db.execute("INSERT INTO conversation_messages(conversation_id,role,content,language,kind,confidence,evidence_json,created_at) VALUES (?,?,?,?,?,?,?,?)", (conversation_id, role, content, language, kind, confidence, json.dumps(evidence or [], ensure_ascii=False), now))
+        db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
 
 
 def find_case(case_id):
@@ -534,7 +582,27 @@ def dashboard():
     with get_db() as db:
         stats = dict(db.execute("SELECT COUNT(*) total, SUM(status='Under Investigation') active, ROUND(AVG(risk_score),1) avg_risk, SUM(gravity='Heinous') heinous FROM cases").fetchone())
         stats["linked"] = db.execute("SELECT COUNT(*) FROM accused WHERE (SELECT COUNT(*) FROM case_accused WHERE accused_id=accused.id)>1").fetchone()[0]
-    return render_template("dashboard.html", stats=stats)
+        rows = db.execute("SELECT incident_date, location, district, minor_head, risk_score FROM cases").fetchall()
+        hotspots = [dict(row) for row in db.execute("SELECT location, district, COUNT(*) case_count, ROUND(AVG(risk_score),0) risk FROM cases GROUP BY lower(location), lower(district) ORDER BY case_count DESC, risk DESC LIMIT 5")]
+        repeat = [dict(row) for row in db.execute("SELECT a.canonical_name name, COUNT(*) case_count FROM accused a JOIN case_accused ca ON ca.accused_id=a.id GROUP BY a.id HAVING COUNT(*)>1 ORDER BY case_count DESC LIMIT 4")]
+    monthly = {}
+    for row in rows:
+        try:
+            date = datetime.strptime(row["incident_date"], "%d %b %Y")
+        except ValueError:
+            continue
+        key = date.strftime("%Y-%m")
+        monthly[key] = monthly.get(key, 0) + 1
+    trend = [{"label": datetime.strptime(key, "%Y-%m").strftime("%b %y"), "count": count} for key, count in sorted(monthly.items())[-6:]]
+    maximum = max((item["count"] for item in trend), default=1)
+    for item in trend:
+        item["height"] = max(14, round(item["count"] / maximum * 100))
+    alerts = []
+    for item in hotspots[:2]:
+        alerts.append({"title": f"Hotspot signal · {item['location']}", "detail": f"{item['case_count']} recorded FIR(s), average risk {int(item['risk'] or 0)}/100. Review patrol coverage and recent link evidence."})
+    for item in repeat[:2]:
+        alerts.append({"title": f"Repeat-identity signal · {item['name']}", "detail": f"Appears in {item['case_count']} FIRs. This is an analytical lead; identity requires investigator verification."})
+    return render_template("dashboard.html", stats=stats, trend=trend, hotspots=hotspots, alerts=alerts)
 
 
 @app.route("/case/<int:case_id>")
@@ -547,7 +615,9 @@ def case_board(case_id):
         return "Case not found", 404
     audit("VIEW", "CASE", case["crime_no"])
     linked = linked_cases(case_id)
-    return render_template("board.html", case=case, board=board_payload(case), linked=linked)
+    conversation = active_conversation(case_id)
+    history = conversation_history(conversation["id"]) if conversation else []
+    return render_template("board.html", case=case, board=board_payload(case), linked=linked, conversation=conversation, conversation_history=history)
 
 
 @app.post("/api/case/<int:case_id>/ask")
@@ -557,9 +627,17 @@ def ask_case(case_id):
     if not case:
         return jsonify({"error": "Case not found"}), 404
     question = (request.get_json(silent=True) or {}).get("question", "").strip()
+    if not question:
+        return jsonify({"error": "Question is required"}), 400
+    conversation = active_conversation(case_id)
+    history = conversation_history(conversation["id"])
+    previous_user_question = next((item["content"] for item in reversed(history) if item["role"] == "user"), "")
+    question_language = detect_language(question)
+    store_message(conversation["id"], "user", question, question_language)
     normalized = question.lower()
+    context_text = f"{previous_user_question} {question}".lower() if any(term in normalized for term in ["his", "her", "their", "that", "those", "it", "ಅವನ", "ಅದರ", "ಅವು"] ) else normalized
     linked = linked_cases(case_id)
-    if any(term in normalized for term in ["other case", "repeat", "linked", "history", "ಹಿಂದಿನ"]):
+    if any(term in context_text for term in ["other case", "repeat", "linked", "history", "ಹಿಂದಿನ"]):
         if linked:
             names = ", ".join(f"FIR {item['case_no']} ({item['link_score']}% link score)" for item in linked[:4])
             answer = f"Explainable cross-case leads found: {names}. Scores combine accused-name similarity, crime sub-head, distance and time window; identity must still be confirmed by an investigator."
@@ -568,11 +646,11 @@ def ask_case(case_id):
             kind = "Analytical lead"
         else:
             answer, evidence, confidence, kind = "No linked case was found in the current authorised dataset.", [{"table": "Accused", "field": "CaseMasterID", "value": str(case_id), "record": "Current case"}], 100, "Verified fact"
-    elif any(term in normalized for term in ["where", "location", "place", "ಎಲ್ಲಿ"]):
+    elif any(term in context_text for term in ["where", "location", "place", "ಎಲ್ಲಿ"]):
         answer = f"The incident was recorded at {case['location']} on {case['date']} at {case['time']}."
         evidence = [{"table": "CaseMaster", "field": "latitude / longitude", "value": f"{case['lat']}, {case['lng']}", "record": case["crime_no"]}, {"table": "CaseMaster", "field": "IncidentFromDate", "value": f"{case['date']} {case['time']}", "record": case["crime_no"]}]
         confidence, kind = 100, "Verified fact"
-    elif any(term in normalized for term in ["section", "act", "charge", "ಕಲಂ"]):
+    elif any(term in context_text for term in ["section", "act", "charge", "ಕಲಂ"]):
         answer = "Recorded legal provisions: " + ", ".join(case["acts"]) + "."
         evidence = [{"table": "ActSectionAssociation", "field": "ActID / SectionID", "value": act, "record": case["crime_no"]} for act in case["acts"]]
         confidence, kind = 100, "Verified fact"
@@ -581,7 +659,8 @@ def ask_case(case_id):
         evidence = [{"table": "CaseMaster", "field": "BriefFacts", "value": case["brief"], "record": case["crime_no"]}, {"table": "CaseStatusMaster", "field": "CaseStatusName", "value": case["status"], "record": case["crime_no"]}]
         confidence, kind = 100, "Verified fact"
     audit("AI_QUERY", "CASE", f"{case['crime_no']} · {question[:80]}")
-    return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "minor": item["minor"], "score": item["link_score"], "reasons": item["link_reasons"]} for item in linked]})
+    store_message(conversation["id"], "assistant", answer, question_language, kind, confidence, evidence)
+    return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "conversation_id": conversation["id"], "context_used": bool(previous_user_question and context_text != normalized), "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "minor": item["minor"], "score": item["link_score"], "reasons": item["link_reasons"]} for item in linked]})
 
 
 @app.post("/api/case/<int:case_id>/expand")
@@ -621,6 +700,51 @@ def expand_graph(case_id):
     } for item in matches[:8]]})
 
 
+@app.get("/case/<int:case_id>/conversation.pdf")
+@login_required
+def export_conversation_pdf(case_id):
+    case = find_case(case_id)
+    if not case or current_user()["role"] == "policymaker":
+        return "Case not found", 404
+    conversation = active_conversation(case_id, create=False)
+    history = conversation_history(conversation["id"]) if conversation else []
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    except ImportError:
+        return "PDF support is not installed", 503
+    buffer = BytesIO()
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ReportTitle", parent=styles["Title"], textColor=colors.HexColor("#0b2948"), fontSize=20, leading=24, alignment=TA_CENTER))
+    styles.add(ParagraphStyle(name="Meta", parent=styles["Normal"], textColor=colors.HexColor("#607387"), fontSize=8, leading=12))
+    styles.add(ParagraphStyle(name="UserTurn", parent=styles["Normal"], backColor=colors.HexColor("#edf6fb"), borderColor=colors.HexColor("#c7dfec"), borderWidth=.5, borderPadding=8, fontSize=9, leading=14, spaceAfter=7))
+    styles.add(ParagraphStyle(name="AssistantTurn", parent=styles["Normal"], backColor=colors.HexColor("#f8fafc"), borderColor=colors.HexColor("#dce4eb"), borderWidth=.5, borderPadding=8, fontSize=9, leading=14, spaceAfter=7))
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=16*mm, bottomMargin=16*mm, title=f"FIR {case['case_no']} Intelligence Conversation")
+    story = [Paragraph("KSP Crime Intelligence", styles["ReportTitle"]), Spacer(1, 4*mm), Table([
+        ["FIR", case["case_no"], "Crime No.", case["crime_no"]],
+        ["Case", case["title"], "Status", case["status"]],
+        ["Location", case["location"], "Officer", current_user()["name"]],
+    ], colWidths=[22*mm, 58*mm, 25*mm, 60*mm], style=TableStyle([("BACKGROUND",(0,0),(0,-1),colors.HexColor("#edf4f8")),("BACKGROUND",(2,0),(2,-1),colors.HexColor("#edf4f8")),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#d6e1e9")),("FONTNAME",(0,0),(-1,-1),"Helvetica"),("FONTSIZE",(0,0),(-1,-1),7.5),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),6)])), Spacer(1, 6*mm)]
+    if not history:
+        story.append(Paragraph("No conversation has been recorded for this case.", styles["Meta"]))
+    for index, message in enumerate(history, 1):
+        label = "Investigator" if message["role"] == "user" else f"Intelligence agent · {message.get('kind') or 'Response'} · confidence {message.get('confidence') or '-'}%"
+        story.append(Paragraph(f"<b>{escape(label)}</b><br/>{escape(message['content'])}", styles["UserTurn" if message["role"] == "user" else "AssistantTurn"]))
+        if message["role"] == "assistant" and message["evidence"]:
+            evidence_rows = [["Source", "Value", "Record"]] + [[f"{item.get('table','')}.{item.get('field','')}", item.get("value", ""), item.get("record", "")] for item in message["evidence"]]
+            story.append(Table(evidence_rows, repeatRows=1, colWidths=[42*mm, 58*mm, 66*mm], style=TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#123b62")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.3,colors.HexColor("#d9e2e9")),("FONTSIZE",(0,0),(-1,-1),6.5),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),4)])))
+            story.append(Spacer(1, 3*mm))
+    story.extend([Spacer(1, 5*mm), Paragraph(f"Generated {datetime.now().strftime('%d %b %Y %H:%M')} · Authorised use only · Every analytical lead requires investigator verification.", styles["Meta"])])
+    doc.build(story)
+    buffer.seek(0)
+    audit("EXPORT_PDF", "CONVERSATION", case["crime_no"])
+    return send_file(buffer, mimetype="application/pdf", as_attachment=True, download_name=f"FIR-{case['case_no']}-conversation.pdf")
+
+
 @app.get("/api/audit")
 @login_required
 def audit_feed():
@@ -635,4 +759,5 @@ init_db()
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("X_ZOHO_CATALYST_LISTEN_PORT", os.environ.get("PORT", "5000")))
+    app.run(host="0.0.0.0", port=port, debug=os.environ.get("FLASK_DEBUG") == "1")

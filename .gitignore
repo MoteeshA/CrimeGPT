@@ -1,8 +1,6 @@
+.DS_Store
 .venv/
 __pycache__/
-*.py[cod]
+*.pyc
 *.db
-.DS_Store
 .env
-.env.*
-uploads/
