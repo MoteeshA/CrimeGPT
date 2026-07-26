@@ -403,7 +403,7 @@ def secure_response(response):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), geolocation=(), microphone=(self)")
-    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://static.zohocdn.com; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'")
     if request.path.startswith("/api/") or request.path in {"/health", "/ready"}:
         response.headers.setdefault("Cache-Control", "no-store")
     return response
@@ -787,8 +787,6 @@ def logout():
     audit("LOGOUT", "AUTH")
     session.clear()
     if catalyst_auth_enabled():
-        # Catalyst owns the authentication cookie. Its hosted login page safely
-        # handles the next sign-in; a full sign-out is exposed by the Web SDK.
         return render_template("catalyst_logout.html", login_url=CATALYST_HOSTED_LOGIN_URL)
     return redirect(url_for("login"))
 

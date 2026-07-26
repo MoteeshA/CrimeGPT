@@ -67,6 +67,14 @@ class CrimeGPTTests(unittest.TestCase):
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+        self.assertIn("https://static.zohocdn.com", response.headers["Content-Security-Policy"])
+
+    def test_catalyst_logout_uses_web_sdk(self):
+        os.environ["CATALYST_AUTH_ENABLED"] = "1"
+        response = self.client.get("/logout")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"catalyst.auth.signOut", response.data)
+        os.environ["CATALYST_AUTH_ENABLED"] = "0"
 
     def test_policymaker_cannot_ingest_or_query_cases(self):
         self.login_as("POL001")
