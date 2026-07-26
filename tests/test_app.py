@@ -51,6 +51,25 @@ class CrimeGPTTests(unittest.TestCase):
         self.assertTrue(response.json["evidence"])
         self.assertEqual(response.json["kind"], "Verified fact")
 
+    def test_health_and_readiness(self):
+        self.assertEqual(self.client.get("/health").json["status"], "ok")
+        self.assertEqual(self.client.get("/ready").json["status"], "ready")
+
+    def test_security_headers_are_present(self):
+        response = self.client.get("/")
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+
+    def test_policymaker_cannot_ingest_or_query_cases(self):
+        self.login_as("POL001")
+        self.assertEqual(self.client.get("/fir/new").status_code, 403)
+        self.assertEqual(self.client.post("/api/case/417/ask", json={"question": "Where?"}).status_code, 403)
+
+    def test_unauthenticated_api_is_not_executed(self):
+        response = self.client.post("/api/case/417/ask", json={"question": "Where?"})
+        self.assertEqual(response.status_code, 302)
+
 
 if __name__ == "__main__":
     unittest.main()

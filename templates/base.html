@@ -39,6 +39,7 @@
         <main class="content">{% block content %}{% endblock %}</main>
     </div>
 </div>
+<script>window.csrfToken='{{ csrf_token }}';const nativeFetch=window.fetch.bind(window);window.fetch=(input,options={})=>{const method=(options.method||'GET').toUpperCase();if(!['GET','HEAD','OPTIONS'].includes(method)){options.headers=new Headers(options.headers||{});options.headers.set('X-CSRF-Token',window.csrfToken)}return nativeFetch(input,options)};</script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

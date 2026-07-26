@@ -7,6 +7,8 @@ import sqlite3
 import re
 import unicodedata
 import json
+import logging
+import secrets
 from xml.sax.saxutils import escape
 from difflib import SequenceMatcher
 from math import asin, cos, radians, sin, sqrt
@@ -24,6 +26,7 @@ app.config.update(
     SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE") == "1",
     PERMANENT_SESSION_LIFETIME=1800,
 )
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 DB_PATH = Path(os.environ.get("DATABASE_PATH", Path(__file__).with_name("ksp_intelligence.db")))
 
 
@@ -215,6 +218,61 @@ def roles_required(*allowed_roles):
             return view(*args, **kwargs)
         return wrapped
     return decorator
+
+
+def csrf_token():
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_urlsafe(32)
+    return session["csrf_token"]
+
+
+@app.before_request
+def enforce_request_security():
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not app.config.get("TESTING"):
+        supplied = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token")
+        expected = session.get("csrf_token")
+        if not expected or not secrets.compare_digest(supplied or "", expected):
+            audit("CSRF_REJECTED", request.path, request.remote_addr or "unknown")
+            return (jsonify({"error": "Invalid or expired security token"}), 400) if request.path.startswith("/api/") else ("Invalid or expired security token", 400)
+
+
+@app.after_request
+def secure_response(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), geolocation=(), microphone=(self)")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'")
+    if request.path.startswith("/api/") or request.path in {"/health", "/ready"}:
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok", "service": "crimegpt"})
+
+
+@app.get("/ready")
+def ready():
+    try:
+        with get_db() as db:
+            db.execute("SELECT 1").fetchone()
+        return jsonify({"status": "ready", "database": "available"})
+    except sqlite3.Error:
+        app.logger.exception("Readiness database check failed")
+        return jsonify({"status": "not-ready", "database": "unavailable"}), 503
+
+
+@app.errorhandler(413)
+def upload_too_large(_error):
+    return (jsonify({"error": "File exceeds the 5 MB upload limit"}), 413) if request.path.startswith("/api/") else ("File exceeds the 5 MB upload limit", 413)
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    app.logger.error("Unhandled request error on %s: %s", request.path, error)
+    return (jsonify({"error": "Internal service error", "request_path": request.path}), 500) if request.path.startswith("/api/") else ("Internal service error. The incident has been logged.", 500)
 
 
 def audit(action, resource, detail=""):
@@ -480,7 +538,7 @@ def normalized_form_time(value):
 
 @app.context_processor
 def inject_globals():
-    return {"user": current_user(), "current_year": datetime.now().year}
+    return {"user": current_user(), "current_year": datetime.now().year, "csrf_token": csrf_token()}
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -496,6 +554,8 @@ def login():
         if account and check_password_hash(account["password_hash"], password):
             session.clear()
             session["officer_id"] = officer_id
+            session["csrf_token"] = secrets.token_urlsafe(32)
+            session.permanent = True
             audit("LOGIN", "AUTH", "Successful demo login")
             return redirect(url_for("workspace"))
         error = "Officer ID or password is incorrect."
@@ -536,10 +596,8 @@ def cases():
 
 
 @app.route("/fir/new", methods=["GET", "POST"])
-@login_required
+@roles_required("investigator", "analyst")
 def new_fir():
-    if current_user()["role"] not in {"investigator", "analyst"}:
-        return redirect(url_for("dashboard"))
     error = None
     extracted_text = ""
     detected_language = ""
@@ -592,10 +650,8 @@ def new_fir():
 
 
 @app.post("/api/fir/extract")
-@login_required
+@roles_required("investigator", "analyst")
 def preview_fir_extraction():
-    if current_user()["role"] not in {"investigator", "analyst"}:
-        return jsonify({"error": "Forbidden"}), 403
     try:
         text, filename = extract_document(request.files.get("fir_document"))
         text = request.form.get("brief_facts", "").strip() or text
@@ -655,7 +711,7 @@ def case_board(case_id):
 
 
 @app.post("/api/case/<int:case_id>/ask")
-@login_required
+@roles_required("investigator", "analyst", "supervisor")
 def ask_case(case_id):
     case = find_case(case_id)
     if not case:
@@ -698,7 +754,7 @@ def ask_case(case_id):
 
 
 @app.post("/api/case/<int:case_id>/expand")
-@login_required
+@roles_required("investigator", "analyst", "supervisor")
 def expand_graph(case_id):
     source_case = find_case(case_id)
     if not source_case:
@@ -780,10 +836,8 @@ def export_conversation_pdf(case_id):
 
 
 @app.get("/api/audit")
-@login_required
+@roles_required("supervisor", "analyst")
 def audit_feed():
-    if current_user()["role"] not in {"supervisor", "analyst"}:
-        return jsonify({"error": "Forbidden"}), 403
     with get_db() as db:
         rows = db.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 50").fetchall()
     return jsonify([dict(row) for row in rows])
