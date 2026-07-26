@@ -87,6 +87,8 @@ class CrimeGPTTests(unittest.TestCase):
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
         self.assertIn("https://static.zohocdn.com", response.headers["Content-Security-Policy"])
+        self.assertIn("worker-src 'self' blob:", response.headers["Content-Security-Policy"])
+        self.assertIn("https://tile.openstreetmap.org", response.headers["Content-Security-Policy"])
 
     def test_catalyst_logout_uses_web_sdk(self):
         os.environ["CATALYST_AUTH_ENABLED"] = "1"

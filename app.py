@@ -512,7 +512,16 @@ def secure_response(response):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), geolocation=(), microphone=(self)")
-    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://static.zohocdn.com; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline' https://static.zohocdn.com; "
+        "worker-src 'self' blob:; "
+        "img-src 'self' data: https://tile.openstreetmap.org; "
+        "connect-src 'self' https://tile.openstreetmap.org; "
+        "font-src 'self'; frame-ancestors 'none'",
+    )
     if request.path.startswith("/api/") or request.path in {"/health", "/ready"}:
         response.headers.setdefault("Cache-Control", "no-store")
     elapsed = max(0.0, (datetime.now() - getattr(g, "request_started", datetime.now())).total_seconds() * 1000)
