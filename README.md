@@ -55,3 +55,19 @@ The intake screen provides `Extract fields for review` for searchable PDF and UT
 Extraction is assistive: suggested fields remain visually marked until an officer verifies and submits them. Conservative person-name resolution can connect variants such as `R. Naik` and `Ravi Naik` without training a custom model.
 
 Anonymised English, Kannada, and Hindi examples are available under `samples/`.
+
+## Production controls
+
+Cloud deployments do not load the bundled demo FIRs unless `SEED_DEMO_DATA=1` is explicitly set. Keep it `0` for every controlled or production environment.
+
+Analysts and supervisors can import authorised UTF-8 CCTNS CSV/JSON extracts through `POST /api/admin/import-cctns`. The accepted column aliases and a synthetic mapping file are in `samples/cctns_import_template.csv`. Imports are validated, SHA-256 deduplicated and audited; malformed rows are rejected without being silently invented.
+
+Operational endpoints are role protected:
+
+- `GET /api/admin/permissions` — effective role permissions.
+- `GET /api/model/evaluation` — validation status and labelled threshold metrics.
+- `GET /api/metrics` — request latency/error telemetry for analysts and supervisors.
+- `GET /api/admin/backup` — supervisor-only consistent snapshot.
+- `POST /api/admin/retention` — supervisor-only audited conversation retention.
+
+See `PRODUCTION_READINESS.md` for environment settings, load-test acceptance criteria, model validation, security operations and the external SCRB/legal approval gates.

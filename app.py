@@ -7,6 +7,8 @@ import sqlite3
 import re
 import unicodedata
 import json
+import csv
+import hashlib
 import logging
 import secrets
 import threading
@@ -55,6 +57,17 @@ CASES = [
 ]
 
 AUDIT_LOG = []
+REQUEST_METRICS = {"started_at": datetime.now().isoformat(), "requests": 0, "errors": 0, "total_ms": 0.0, "routes": {}}
+
+
+def env_flag(name, default=False):
+    value = os.environ.get(name)
+    return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def demo_seed_enabled():
+    """Demo identities and FIRs must never silently enter a cloud deployment."""
+    return env_flag("SEED_DEMO_DATA", not catalyst_enabled())
 
 
 def get_db():
@@ -213,13 +226,33 @@ def init_db():
                 evidence_json TEXT,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS import_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                checksum TEXT NOT NULL UNIQUE,
+                source_name TEXT NOT NULL,
+                imported_by TEXT NOT NULL,
+                accepted INTEGER NOT NULL,
+                rejected INTEGER NOT NULL,
+                errors_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS model_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                model_version TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                features_json TEXT NOT NULL,
+                explanation_json TEXT NOT NULL,
+                outcome INTEGER,
+                created_at TEXT NOT NULL
+            );
         """)
-        if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+        if demo_seed_enabled() and db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             db.executemany(
                 "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, ?, 1)",
                 [(officer_id, generate_password_hash(item["password"], method="pbkdf2:sha256"), item["name"], item["role"], item["rank"], item["unit"]) for officer_id, item in USERS.items()],
             )
-        if db.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 0:
+        if demo_seed_enabled() and db.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 0:
             for case in CASES:
                 db.execute("""INSERT OR IGNORE INTO cases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                     case["id"], case["crime_no"], case["case_no"], case["title"], case["category"], case["major"], case["minor"],
@@ -391,6 +424,7 @@ def csrf_token():
 
 @app.before_request
 def enforce_request_security():
+    g.request_started = datetime.now()
     if catalyst_enabled():
         try:
             catalyst_app()
@@ -414,6 +448,17 @@ def secure_response(response):
     response.headers.setdefault("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://static.zohocdn.com; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'")
     if request.path.startswith("/api/") or request.path in {"/health", "/ready"}:
         response.headers.setdefault("Cache-Control", "no-store")
+    elapsed = max(0.0, (datetime.now() - getattr(g, "request_started", datetime.now())).total_seconds() * 1000)
+    REQUEST_METRICS["requests"] += 1
+    REQUEST_METRICS["total_ms"] += elapsed
+    if response.status_code >= 500:
+        REQUEST_METRICS["errors"] += 1
+    route = request.url_rule.rule if request.url_rule else "unmatched"
+    route_metrics = REQUEST_METRICS["routes"].setdefault(route, {"count": 0, "errors": 0, "total_ms": 0.0})
+    route_metrics["count"] += 1
+    route_metrics["total_ms"] += elapsed
+    route_metrics["errors"] += int(response.status_code >= 500)
+    response.headers.setdefault("Server-Timing", f"app;dur={elapsed:.1f}")
     return response
 
 
@@ -439,6 +484,13 @@ def ready():
     except sqlite3.Error:
         app.logger.exception("Readiness database check failed")
         return jsonify({"status": "not-ready", "database": "unavailable"}), 503
+
+
+@app.get("/api/metrics")
+@roles_required("supervisor", "analyst")
+def metrics():
+    routes = {name: {**values, "average_ms": round(values["total_ms"] / max(values["count"], 1), 2)} for name, values in REQUEST_METRICS["routes"].items()}
+    return jsonify({**REQUEST_METRICS, "average_ms": round(REQUEST_METRICS["total_ms"] / max(REQUEST_METRICS["requests"], 1), 2), "routes": routes})
 
 
 @app.errorhandler(413)
@@ -730,6 +782,82 @@ def normalized_form_time(value):
     return value
 
 
+CCTNS_FIELD_ALIASES = {
+    "crime_no": ("crime_no", "crime_number", "fir_no", "firnumber"),
+    "case_no": ("case_no", "case_number"),
+    "title": ("title", "case_title", "fir_title"),
+    "major": ("major", "major_head", "majorhead"),
+    "minor": ("minor", "minor_head", "crime_head", "offence"),
+    "status": ("status", "case_status"),
+    "gravity": ("gravity", "case_gravity"),
+    "station": ("station", "police_station", "ps_name"),
+    "district": ("district", "district_name"),
+    "date": ("date", "incident_date", "incidentfromdate"),
+    "time": ("time", "incident_time", "incidentfromtime"),
+    "location": ("location", "place_of_occurrence", "occurrence_place"),
+    "lat": ("lat", "latitude"), "lng": ("lng", "longitude"),
+    "officer": ("officer", "investigating_officer", "io_name"),
+    "complainant": ("complainant", "complainant_name"),
+    "victim": ("victim", "victim_name"), "brief": ("brief", "brief_facts", "narrative"),
+    "accused": ("accused", "accused_names"), "acts": ("acts", "sections", "act_sections"),
+}
+
+
+def mapped_value(record, field, default=""):
+    normalized = {re.sub(r"[^a-z0-9]", "", str(key).lower()): value for key, value in record.items()}
+    for alias in CCTNS_FIELD_ALIASES[field]:
+        key = re.sub(r"[^a-z0-9]", "", alias.lower())
+        if key in normalized and normalized[key] not in {None, ""}:
+            return normalized[key]
+    return default
+
+
+def explainable_risk(case, db):
+    """Transparent baseline; intended for validation, never as an automated enforcement decision."""
+    accused_counts = []
+    for name in case.get("accused", []):
+        if is_placeholder_identity(name):
+            continue
+        accused_counts.append(db.execute("SELECT COUNT(*) FROM case_accused ca JOIN accused a ON a.id=ca.accused_id WHERE a.identity_key=?", (normalize_person_name(name).replace(" ", ""),)).fetchone()[0])
+    nearby = 0
+    if case.get("lat") is not None and case.get("lng") is not None:
+        for row in db.execute("SELECT latitude,longitude FROM cases WHERE latitude IS NOT NULL AND longitude IS NOT NULL"):
+            nearby += int(distance_km(float(case["lat"]), float(case["lng"]), row[0], row[1]) <= 5)
+    features = {"heinous": int(str(case.get("gravity", "")).lower() == "heinous"), "repeat_identity_max": max(accused_counts, default=0), "nearby_cases_5km": nearby, "night_time": int(str(case.get("time", "12:00"))[:2].isdigit() and (int(str(case.get("time"))[:2]) >= 22 or int(str(case.get("time"))[:2]) < 5))}
+    contributions = {"gravity": features["heinous"] * 25, "repeat identity": min(features["repeat_identity_max"] * 12, 30), "5 km density": min(features["nearby_cases_5km"] * 4, 25), "night-time pattern": features["night_time"] * 15}
+    score = max(0, min(100, 15 + sum(contributions.values())))
+    return score, features, contributions
+
+
+def import_cctns_records(records, source_name, officer_id):
+    accepted, errors, imported_ids = 0, [], []
+    with get_db() as db:
+        for index, raw in enumerate(records, 2):
+            try:
+                crime_no = str(mapped_value(raw, "crime_no")).strip()
+                station, district = str(mapped_value(raw, "station")).strip(), str(mapped_value(raw, "district")).strip()
+                date, location = normalized_form_date(mapped_value(raw, "date")), str(mapped_value(raw, "location")).strip()
+                if not all((crime_no, station, district, date, location)):
+                    raise ValueError("missing crime_no, station, district, date or location")
+                existing = db.execute("SELECT id FROM cases WHERE crime_no=?", (crime_no,)).fetchone()
+                case_id = existing[0] if existing else int(re.sub(r"\D", "", str(mapped_value(raw, "case_no", crime_no)))[-9:] or 0)
+                while not existing and db.execute("SELECT 1 FROM cases WHERE id=?", (case_id,)).fetchone():
+                    case_id += 1
+                split_values = lambda value: [part.strip() for part in re.split(r"[|;,]", str(value)) if part.strip()]
+                case = {"id": case_id, "crime_no": crime_no, "case_no": str(mapped_value(raw, "case_no", crime_no[-9:])), "title": str(mapped_value(raw, "title", "Imported FIR")), "category": "FIR", "major": str(mapped_value(raw, "major", "Other")), "minor": str(mapped_value(raw, "minor", "Other")), "status": str(mapped_value(raw, "status", "Under Investigation")), "gravity": str(mapped_value(raw, "gravity", "Non-Heinous")), "station": station, "district": district, "date": date, "time": normalized_form_time(mapped_value(raw, "time", "00:00")), "location": location, "lat": float(mapped_value(raw, "lat")) if mapped_value(raw, "lat") not in {"", None} else None, "lng": float(mapped_value(raw, "lng")) if mapped_value(raw, "lng") not in {"", None} else None, "officer": str(mapped_value(raw, "officer", officer_id)), "complainant": str(mapped_value(raw, "complainant")), "victim": str(mapped_value(raw, "victim")), "brief": str(mapped_value(raw, "brief")), "accused": split_values(mapped_value(raw, "accused")), "acts": split_values(mapped_value(raw, "acts"))}
+                score, features, explanation = explainable_risk(case, db)
+                db.execute("""INSERT OR REPLACE INTO cases(id,crime_no,case_no,title,category,major_head,minor_head,status,gravity,station,district,incident_date,incident_time,location,latitude,longitude,officer,complainant,victim,brief_facts,risk_score,source_language,source_document) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (case["id"],case["crime_no"],case["case_no"],case["title"],case["category"],case["major"],case["minor"],case["status"],case["gravity"],case["station"],case["district"],case["date"],case["time"],case["location"],case["lat"],case["lng"],case["officer"],case["complainant"],case["victim"],case["brief"],score,detect_language(case["brief"]),source_name))
+                db.execute("DELETE FROM case_accused WHERE case_id=?", (case_id,)); db.execute("DELETE FROM case_acts WHERE case_id=?", (case_id,))
+                for order, name in enumerate(case["accused"], 1):
+                    accused_id, _, _ = resolve_accused(db, name); db.execute("INSERT OR IGNORE INTO case_accused VALUES (?,?,?)", (case_id, accused_id, order))
+                db.executemany("INSERT OR IGNORE INTO case_acts VALUES (?,?)", [(case_id, act) for act in case["acts"]])
+                db.execute("INSERT INTO model_predictions(case_id,model_version,score,features_json,explanation_json,created_at) VALUES (?,?,?,?,?,?)", (case_id,"transparent-baseline-1",score,json.dumps(features),json.dumps(explanation),datetime.now().isoformat()))
+                accepted += 1; imported_ids.append(case_id)
+            except (ValueError, TypeError, sqlite3.Error) as exc:
+                errors.append({"row": index, "error": str(exc)})
+    return accepted, errors, imported_ids
+
+
 def grounded_ai_answer(question, case, linked, history):
     """Call an optional private model endpoint with only authorised case context."""
     endpoint = os.environ.get("AI_ENDPOINT_URL", "").strip()
@@ -903,6 +1031,91 @@ def preview_fir_extraction():
         return jsonify(result)
     except (ValueError, OSError) as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/admin/import-cctns")
+@roles_required("analyst", "supervisor")
+def import_cctns():
+    upload = request.files.get("dataset")
+    if not upload or not upload.filename:
+        return jsonify({"error": "Attach a UTF-8 CSV or JSON dataset."}), 400
+    raw = upload.read()
+    if len(raw) > 20 * 1024 * 1024:
+        return jsonify({"error": "Dataset exceeds the 20 MB controlled-import limit."}), 413
+    checksum = hashlib.sha256(raw).hexdigest()
+    with get_db() as db:
+        previous = db.execute("SELECT * FROM import_jobs WHERE checksum=?", (checksum,)).fetchone()
+    if previous:
+        return jsonify({"error": "This exact dataset was already imported.", "import_job": dict(previous)}), 409
+    try:
+        decoded = raw.decode("utf-8-sig")
+        records = json.loads(decoded) if upload.filename.lower().endswith(".json") else list(csv.DictReader(decoded.splitlines()))
+        if isinstance(records, dict):
+            records = records.get("records") or records.get("cases") or []
+        if not isinstance(records, list) or not records:
+            raise ValueError("No records were found in the dataset")
+        accepted, errors, imported_ids = import_cctns_records(records, upload.filename, current_user()["id"])
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    with get_db() as db:
+        db.execute("INSERT INTO import_jobs(checksum,source_name,imported_by,accepted,rejected,errors_json,created_at) VALUES (?,?,?,?,?,?,?)", (checksum,upload.filename,current_user()["id"],accepted,len(errors),json.dumps(errors),datetime.now().isoformat()))
+    for case_id in imported_ids:
+        try:
+            persist_case_to_cloud(case_id)
+        except Exception:
+            app.logger.exception("Cloud persistence failed for imported case %s", case_id)
+    audit("BULK_IMPORT", "CCTNS", f"{upload.filename} · accepted={accepted} · rejected={len(errors)} · sha256={checksum}")
+    return jsonify({"accepted": accepted, "rejected": len(errors), "errors": errors[:100], "checksum": checksum}), 201 if accepted else 422
+
+
+@app.get("/api/admin/permissions")
+@login_required
+def permission_matrix():
+    matrix = {
+        "investigator": ["cases:read", "fir:create", "intelligence:query", "graph:explore", "conversation:export"],
+        "analyst": ["cases:read", "fir:create", "dataset:import", "intelligence:query", "graph:explore", "conversation:export", "audit:read", "metrics:read"],
+        "supervisor": ["cases:read", "intelligence:query", "graph:explore", "conversation:export", "audit:read", "metrics:read", "backup:export", "retention:execute"],
+        "policymaker": ["aggregate-dashboard:read"],
+    }
+    return jsonify({"role": current_user()["role"], "permissions": matrix[current_user()["role"]], "matrix": matrix if current_user()["role"] == "supervisor" else None})
+
+
+@app.get("/api/admin/backup")
+@roles_required("supervisor")
+def export_backup():
+    snapshot = BytesIO()
+    with get_db() as source:
+        temporary = NamedTemporaryFile(suffix=".db", delete=False)
+        temporary.close()
+        destination = sqlite3.connect(temporary.name)
+        source.backup(destination); destination.close()
+        snapshot.write(Path(temporary.name).read_bytes()); Path(temporary.name).unlink(missing_ok=True)
+    snapshot.seek(0)
+    audit("BACKUP_EXPORT", "DATABASE", "Encrypted transport required; store only in approved KSP vault")
+    return send_file(snapshot, mimetype="application/vnd.sqlite3", as_attachment=True, download_name=f"crimegpt-backup-{datetime.now().strftime('%Y%m%d-%H%M')}.db")
+
+
+@app.post("/api/admin/retention")
+@roles_required("supervisor")
+def enforce_retention():
+    days = max(30, min(int((request.get_json(silent=True) or {}).get("conversation_days", 365)), 3650))
+    with get_db() as db:
+        deleted = db.execute("DELETE FROM conversation_messages WHERE created_at < datetime('now', ?)", (f"-{days} days",)).rowcount
+    audit("RETENTION_EXECUTED", "CONVERSATIONS", f"days={days} · deleted={deleted}")
+    return jsonify({"retention_days": days, "deleted_messages": deleted})
+
+
+@app.get("/api/model/evaluation")
+@roles_required("analyst", "supervisor")
+def model_evaluation():
+    with get_db() as db:
+        rows = db.execute("SELECT score,outcome FROM model_predictions WHERE outcome IS NOT NULL").fetchall()
+    if not rows:
+        return jsonify({"status": "not-validated", "message": "No investigator-confirmed outcomes are available. The baseline must not be described as predictive or used for enforcement.", "minimum_recommended_labels": 500}), 200
+    labels = [(int(row[0]) >= 70, bool(row[1])) for row in rows]
+    tp=sum(p and y for p,y in labels); fp=sum(p and not y for p,y in labels); tn=sum(not p and not y for p,y in labels); fn=sum(not p and y for p,y in labels)
+    safe_div=lambda a,b: round(a/b,4) if b else None
+    return jsonify({"status":"evaluation-only","labels":len(labels),"threshold":70,"precision":safe_div(tp,tp+fp),"recall":safe_div(tp,tp+fn),"false_positive_rate":safe_div(fp,fp+tn),"confusion_matrix":{"tp":tp,"fp":fp,"tn":tn,"fn":fn}})
 
 
 @app.route("/dashboard")

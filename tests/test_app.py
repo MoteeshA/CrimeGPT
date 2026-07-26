@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import os
+from io import BytesIO
 from pathlib import Path
 
 import app as crimegpt
@@ -86,6 +87,49 @@ class CrimeGPTTests(unittest.TestCase):
     def test_unauthenticated_api_is_not_executed(self):
         response = self.client.post("/api/case/417/ask", json={"question": "Where?"})
         self.assertEqual(response.status_code, 302)
+
+    def test_kannada_question_is_detected_and_evidence_grounded(self):
+        self.login_as("INV001")
+        response = self.client.post("/api/case/417/ask", json={"question": "ಈ ಘಟನೆ ಎಲ್ಲಿ ನಡೆಯಿತು?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["evidence"])
+
+    def test_pdf_export_is_a_real_pdf(self):
+        self.login_as("INV001")
+        self.client.post("/api/case/417/ask", json={"question": "Where did this happen?"})
+        response = self.client.get("/case/417/conversation.pdf")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data.startswith(b"%PDF"))
+        self.assertGreater(len(response.data), 1000)
+
+    def test_supervisor_can_export_backup_and_investigator_cannot(self):
+        self.login_as("INV001")
+        self.assertEqual(self.client.get("/api/admin/backup").status_code, 403)
+        self.login_as("SUP001")
+        response = self.client.get("/api/admin/backup")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data.startswith(b"SQLite format 3"))
+
+    def test_cctns_csv_import_is_mapped_and_deduplicated(self):
+        self.login_as("ANL001")
+        payload = b"FIR No,Police Station,District Name,Incident Date,Incident Time,Place of Occurrence,Offence,Accused Names,Sections\n900001,Test PS,Mysuru,26 Jul 2026,23:10,Market Road,Robbery,Test Person,BNS 309\n"
+        first = self.client.post("/api/admin/import-cctns", data={"dataset": (BytesIO(payload), "authorised.csv")}, content_type="multipart/form-data")
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.json["accepted"], 1)
+        second = self.client.post("/api/admin/import-cctns", data={"dataset": (BytesIO(payload), "authorised.csv")}, content_type="multipart/form-data")
+        self.assertEqual(second.status_code, 409)
+
+    def test_unlabelled_model_is_never_claimed_as_validated(self):
+        self.login_as("ANL001")
+        response = self.client.get("/api/model/evaluation")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["status"], "not-validated")
+
+    def test_permissions_are_role_specific(self):
+        self.login_as("POL001")
+        response = self.client.get("/api/admin/permissions")
+        self.assertEqual(response.json["permissions"], ["aggregate-dashboard:read"])
+        self.assertIsNone(response.json["matrix"])
 
 
 if __name__ == "__main__":
