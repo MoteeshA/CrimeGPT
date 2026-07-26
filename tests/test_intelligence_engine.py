@@ -37,8 +37,15 @@ class IntelligenceEngineTests(unittest.TestCase):
         engine = CatalystQuickMLEngine(configured(), transport)
         result = engine.answer("Summarise", RECORDS, {"id": "a", "role": "analyst"}, base_case_id=2)
         self.assertIsNotNone(result)
-        selected = next(item for item in captured["authorised_retrieved_records"] if item["evidence_id"] == "FIR-2")
+        user_context = __import__("json").loads(captured["messages"][1]["content"])
+        selected = next(item for item in user_context["authorised_retrieved_records"] if item["evidence_id"] == "FIR-2")
         self.assertEqual(selected["accused"], [])
+
+    def test_catalyst_glm_does_not_require_endpoint_key(self):
+        config = QuickMLConfig(llm_endpoint="https://quickml.invalid/llm", org_id="org", access_token="oauth")
+        engine = CatalystQuickMLEngine(config, lambda _url, _payload: {})
+        self.assertTrue(config.llm_ready)
+        self.assertNotIn("X-QUICKML-ENDPOINT-KEY", engine._headers())
 
     def test_no_fabrication_rejects_unretrieved_evidence_id(self):
         def transport(_url, _payload):

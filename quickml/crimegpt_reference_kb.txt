@@ -1,0 +1,99 @@
+CrimeGPT QuickML Knowledge Base
+Dataset classification: SYNTHETIC REFERENCE DATA — NOT LIVE SCRB/CCTNS RECORDS
+Purpose: test evidence-grounded retrieval, linked-case reasoning and graph demonstrations.
+Rule: never treat an unknown or placeholder identity as a cross-case identity match.
+
+RECORD REFNET202600990 | Case REF-202600990
+Title: Linked network demonstration FIR
+Status: Under Investigation
+Offence: Robbery
+Location: Majestic Transit Hub, Bengaluru
+Date/time: 25 Jul 2026 23:40
+Named identities: Ravi Naik; Mahesh K.; Arjun Rao; Faisal Khan; Deepak S.; Manoj Patil; Rohit B.; Sameer Ali; Kiran Gowda; Naveen R.; Prakash M.; Sanjay H.
+Evidence note: Synthetic high-density record for graph navigation, linked identities and sequence playback. Risk is not assessed.
+
+RECORD REFNET202600991 | Case REF-202600991
+Title: Transit passenger robbery pattern
+Status: Under Investigation
+Offence: Robbery
+Location: Kempegowda Bus Station, Bengaluru
+Date/time: 23 Jul 2026 22:55
+Named identities: Ravi Naik; Arjun Rao; Faisal Khan
+Relationship evidence: shares those three named identities with REFNET202600990; nearby transit location; similar late-night window.
+
+RECORD REFNET202600992 | Case REF-202600992
+Title: Late-night market robbery pattern
+Status: Under Investigation
+Offence: Robbery
+Location: Cottonpet Main Road, Bengaluru
+Date/time: 20 Jul 2026 00:20
+Named identities: Mahesh K.; Deepak S.; Manoj Patil
+Relationship evidence: shares those three named identities with REFNET202600990; nearby location; similar late-night window.
+
+RECORD REFNET202600993 | Case REF-202600993
+Title: Railway approach robbery pattern
+Status: Under Investigation
+Offence: Robbery
+Location: Krantivira Sangolli Rayanna Station, Bengaluru
+Date/time: 17 Jul 2026 23:10
+Named identities: Rohit B.; Sameer Ali; Kiran Gowda
+Relationship evidence: shares those three named identities with REFNET202600990; nearby transit location; similar late-night window.
+
+RECORD REFNET202600994 | Case REF-202600994
+Title: Pedestrian robbery pattern
+Status: Under Investigation
+Offence: Robbery
+Location: Chickpet Metro, Bengaluru
+Date/time: 14 Jul 2026 22:30
+Named identities: Naveen R.; Prakash M.; Sanjay H.
+Relationship evidence: shares those three named identities with REFNET202600990; nearby location; similar night window.
+
+RECORD REFNET202600995 | Case REF-202600995
+Title: Mobile snatching network pattern
+Status: Under Investigation
+Offence: Robbery
+Location: Kalasipalya Bus Stand, Bengaluru
+Date/time: 11 Jul 2026 21:50
+Named identities: Ravi Naik; Sameer Ali; Naveen R.
+Relationship evidence: each named identity appears in REFNET202600990; nearby location.
+
+RECORD 104430006202600417 | Case 202600417
+Title: Chain snatching near market
+Status: Under Investigation
+Offence: Robbery
+Location: Avenue Road, Bengaluru
+Date/time: 18 Jul 2026 19:42
+Named identity: Ravi Naik
+Placeholder identity: Unknown A2 (excluded from matching)
+Relationship evidence: Ravi Naik also appears in REFNET202600990, REFNET202600991, REFNET202600995, 104430006202600388 and 104430014202500219.
+
+RECORD 104430006202600388 | Case 202600388
+Title: Mobile phone snatching
+Status: Under Investigation
+Offence: Robbery
+Location: K.R. Market, Bengaluru
+Date/time: 09 Jul 2026 20:05
+Named identity: Ravi Naik
+
+RECORD 104430014202500219 | Case 202500219
+Title: Jewellery theft from pedestrian
+Status: Charge Sheeted
+Offence: Theft
+Location: Chickpet Main Road, Bengaluru
+Date/time: 22 Nov 2025 18:55
+Named identities: Ravi Naik; Mahesh K.
+
+RECORD 104430021202600501 | Case 202600501
+Title: Night burglary at pharmacy
+Status: Under Investigation
+Offence: Burglary
+Location: Richmond Road, Bengaluru
+Date/time: 21 Jul 2026 02:14
+Placeholder identity: Unknown A1 (excluded from matching)
+
+Grounding policy:
+1. Answers may cite only record IDs present above.
+2. Synthetic/reference records must be labelled as such.
+3. Risk scores must not be generated or inferred from this document.
+4. Cross-case identity links require the same non-placeholder named identity.
+5. Similar location, offence or time is an analytical lead, not a verified identity match.

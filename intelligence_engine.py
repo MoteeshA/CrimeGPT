@@ -107,7 +107,9 @@ class QuickMLConfig:
 
     @property
     def llm_ready(self):
-        return all((self.llm_endpoint, self.org_id, self.endpoint_key, self.access_token))
+        # Catalyst GLM endpoints use OAuth + CATALYST-ORG. An endpoint key is
+        # optional and is not issued by the current LLM Serving console flow.
+        return all((self.llm_endpoint, self.org_id, self.access_token))
 
     @property
     def rag_ready(self):
@@ -120,13 +122,15 @@ class CatalystQuickMLEngine:
         self.transport = transport or self._http_post
 
     def _headers(self):
-        return {
+        headers = {
             "Content-Type": "application/json",
             "Authorization": f"Zoho-oauthtoken {self.config.access_token}",
             "CATALYST-ORG": self.config.org_id,
-            "X-QUICKML-ENDPOINT-KEY": self.config.endpoint_key,
             "Environment": os.environ.get("CATALYST_ENVIRONMENT", "Development"),
         }
+        if self.config.endpoint_key:
+            headers["X-QUICKML-ENDPOINT-KEY"] = self.config.endpoint_key
+        return headers
 
     def _http_post(self, url, payload):
         request = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers=self._headers(), method="POST")
@@ -136,6 +140,10 @@ class CatalystQuickMLEngine:
     @staticmethod
     def _extract_json(response):
         candidate = response
+        # LLM Serving follows the chat-completions response shape.
+        if isinstance(candidate, dict) and candidate.get("choices"):
+            first = candidate["choices"][0]
+            candidate = first.get("message", {}).get("content", first.get("text", first))
         for key in ("data", "output", "response", "result", "content"):
             if isinstance(candidate, dict) and key in candidate:
                 candidate = candidate[key]
@@ -145,6 +153,19 @@ class CatalystQuickMLEngine:
             match = re.search(r"\{.*\}", candidate, re.S)
             candidate = json.loads(match.group(0) if match else candidate)
         return candidate if isinstance(candidate, dict) else {}
+
+    def _call_llm(self, prompt):
+        """Send an OpenAI-compatible chat request to Catalyst LLM Serving."""
+        system = str(prompt.get("system", ""))
+        user_payload = {key: value for key, value in prompt.items() if key != "system"}
+        return self.transport(self.config.llm_endpoint, {
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        })
 
     @staticmethod
     def _safe_record(record):
@@ -207,7 +228,7 @@ class CatalystQuickMLEngine:
             "conversation_context": (history or [])[-6:], "authorised_retrieved_records": catalogue,
         }
         try:
-            raw = self.transport(self.config.llm_endpoint, prompt)
+            raw = self._call_llm(prompt)
             self._audit(audit_callback, "LLM_ANALYTICS", user, question, allowed_ids, raw)
             result = self._extract_json(raw)
             evidence_ids = {str(value) for value in result.get("evidence_ids", [])}
@@ -229,7 +250,7 @@ class CatalystQuickMLEngine:
         allowed_ids = {str(value) for factor in factors for value in factor["evidence_ids"]}
         prompt = {"system": "Phrase one plain-English reason per supplied risk factor. Do not change points or total score. Do not add facts. Return strict JSON with explanations: [{factor, points, reason, evidence_ids}].", "risk_score_locked": int(case["risk"]), "active_factors_locked": factors}
         try:
-            raw = self.transport(self.config.llm_endpoint, prompt)
+            raw = self._call_llm(prompt)
             self._audit(audit_callback, "LLM_RISK_EXPLANATION", user, f"risk explanation {record_id(case)}", allowed_ids, raw)
             parsed = self._extract_json(raw)
             explanations = parsed.get("explanations", [])

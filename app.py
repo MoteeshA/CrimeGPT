@@ -22,7 +22,7 @@ from math import asin, cos, radians, sin, sqrt
 from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for, send_file
 from werkzeug.security import check_password_hash, generate_password_hash
 from pypdf import PdfReader
-from intelligence_engine import CatalystQuickMLEngine, classify_query
+from intelligence_engine import CatalystQuickMLEngine, QuickMLConfig, classify_query
 
 
 app = Flask(__name__)
@@ -107,6 +107,36 @@ def catalyst_app():
         app.logger.warning("Catalyst SDK is unavailable for %s: %s", request.path, exc)
         g.catalyst_app = None
         return None
+
+
+def quickml_engine():
+    """Build a QuickML client using a Catalyst-managed OAuth connection.
+
+    The access token is fetched dynamically for each request and is never stored
+    in source code or AppSail environment variables.
+    """
+    config = QuickMLConfig.from_env()
+    connection_link = os.environ.get("QUICKML_CONNECTION_LINK_NAME", "").strip()
+    if not config.access_token and connection_link:
+        cloud = catalyst_app()
+        if cloud:
+            try:
+                credentials = cloud.connections().get_connection_credentials(connection_link)
+                headers = (credentials or {}).get("connections", {}).get("headers", {})
+                authorization = next((value for key, value in headers.items() if key.lower() == "authorization"), "")
+                prefix = "zoho-oauthtoken "
+                config.access_token = authorization[len(prefix):] if authorization.lower().startswith(prefix) else authorization
+            except Exception as exc:
+                app.logger.warning("Catalyst QuickML connection unavailable: %s", exc)
+    return CatalystQuickMLEngine(config)
+
+
+def quickml_llm_configured():
+    return bool(
+        os.environ.get("QUICKML_LLM_ENDPOINT_URL")
+        and os.environ.get("QUICKML_ORG_ID")
+        and (os.environ.get("QUICKML_OAUTH_ACCESS_TOKEN") or os.environ.get("QUICKML_CONNECTION_LINK_NAME"))
+    )
 
 
 def cloud_rows(table_name):
@@ -517,7 +547,7 @@ def ready():
             except Exception:
                 cloud_status = "unavailable"
         quickml = {
-            "llm_serving": "configured" if all(os.environ.get(key) for key in ("QUICKML_LLM_ENDPOINT_URL", "QUICKML_ORG_ID", "QUICKML_ENDPOINT_KEY", "QUICKML_OAUTH_ACCESS_TOKEN")) else "not-configured",
+            "llm_serving": "configured" if quickml_llm_configured() else "not-configured",
             "rag": "configured" if os.environ.get("QUICKML_RAG_ENDPOINT_URL") and os.environ.get("QUICKML_RAG_RECORD_DOCUMENT_MAP") else "not-configured",
         }
         status = "ready" if cloud_status != "unavailable" else "degraded"
@@ -910,7 +940,7 @@ def quickml_audit(action, resource, detail):
 
 def grounded_ai_answer(question, case, linked, history):
     """Use only Catalyst QuickML; return None for the deterministic safe fallback."""
-    result = CatalystQuickMLEngine().answer(
+    result = quickml_engine().answer(
         question, all_case_records(), current_user(), base_case_id=case["id"],
         history=[{"role": item["role"], "content": item["content"]} for item in history[-6:]],
         audit_callback=quickml_audit,
@@ -1121,7 +1151,7 @@ def permission_matrix():
 @app.get("/api/admin/production-readiness")
 @roles_required("supervisor")
 def production_readiness():
-    quickml_llm = all(os.environ.get(key) for key in ("QUICKML_LLM_ENDPOINT_URL", "QUICKML_ORG_ID", "QUICKML_ENDPOINT_KEY", "QUICKML_OAUTH_ACCESS_TOKEN"))
+    quickml_llm = quickml_llm_configured()
     quickml_rag = quickml_llm and bool(os.environ.get("QUICKML_RAG_ENDPOINT_URL") and os.environ.get("QUICKML_RAG_RECORD_DOCUMENT_MAP"))
     with get_db() as db:
         case_count = db.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
@@ -1377,7 +1407,7 @@ def ask_analytics():
     question = (request.get_json(silent=True) or {}).get("question", "").strip()
     if not question:
         return jsonify({"error": "Question is required"}), 400
-    result = CatalystQuickMLEngine().answer(
+    result = quickml_engine().answer(
         question, all_case_records(), current_user(), audit_callback=quickml_audit,
     )
     if not result:
@@ -1397,13 +1427,13 @@ def risk_explanation(case_id):
     if not case:
         return jsonify({"error": "Case not found"}), 404
     if int(case.get("risk", -1)) < 0:
-        result = CatalystQuickMLEngine().explain_risk(case, {}, {}, current_user(), quickml_audit)
+        result = quickml_engine().explain_risk(case, {}, {}, current_user(), quickml_audit)
         return jsonify(result)
     with get_db() as db:
         _score, _features, contributions = explainable_risk(case, db)
     active = {name: points for name, points in contributions.items() if points > 0}
     evidence_rows = {name: [case["crime_no"]] for name in active}
-    result = CatalystQuickMLEngine().explain_risk(case, active, evidence_rows, current_user(), quickml_audit)
+    result = quickml_engine().explain_risk(case, active, evidence_rows, current_user(), quickml_audit)
     audit("RISK_EXPLANATION", "CASE", f"{case['crime_no']} engine={result['engine']}")
     return jsonify(result)
 
