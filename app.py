@@ -58,9 +58,10 @@ AUDIT_LOG = []
 
 
 def get_db():
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 30000")
     return connection
 
 
@@ -215,12 +216,12 @@ def init_db():
         """)
         if db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             db.executemany(
-                "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, 1)",
+                "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, ?, 1)",
                 [(officer_id, generate_password_hash(item["password"], method="pbkdf2:sha256"), item["name"], item["role"], item["rank"], item["unit"]) for officer_id, item in USERS.items()],
             )
         if db.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 0:
             for case in CASES:
-                db.execute("""INSERT INTO cases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                db.execute("""INSERT OR IGNORE INTO cases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                     case["id"], case["crime_no"], case["case_no"], case["title"], case["category"], case["major"], case["minor"],
                     case["status"], case["gravity"], case["station"], case["district"], case["date"], case["time"], case["location"],
                     case["lat"], case["lng"], case["officer"], case["complainant"], case["victim"], case["brief"], case["risk"],
@@ -229,8 +230,8 @@ def init_db():
                     identity_key = "".join(character for character in name.lower() if character.isalnum())
                     db.execute("INSERT OR IGNORE INTO accused(canonical_name, identity_key) VALUES (?, ?)", (name, identity_key))
                     accused_id = db.execute("SELECT id FROM accused WHERE identity_key = ?", (identity_key,)).fetchone()[0]
-                    db.execute("INSERT INTO case_accused VALUES (?, ?, ?)", (case["id"], accused_id, order))
-                db.executemany("INSERT INTO case_acts VALUES (?, ?)", [(case["id"], act) for act in case["acts"]])
+                    db.execute("INSERT OR IGNORE INTO case_accused VALUES (?, ?, ?)", (case["id"], accused_id, order))
+                db.executemany("INSERT OR IGNORE INTO case_acts VALUES (?, ?)", [(case["id"], act) for act in case["acts"]])
         columns = {row[1] for row in db.execute("PRAGMA table_info(cases)")}
         if "source_language" not in columns:
             db.execute("ALTER TABLE cases ADD COLUMN source_language TEXT NOT NULL DEFAULT 'English'")
