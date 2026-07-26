@@ -1,0 +1,30 @@
+{
+  "defaults": {
+    "project": 1,
+    "env": 1
+  },
+  "actives": {
+    "project": 1,
+    "env": 1
+  },
+  "projects": [
+    {
+      "idx": 1,
+      "id": "56313000000016001",
+      "name": "CrimeGPT",
+      "domain": {
+        "id": "50044354977",
+        "name": "crimegpt-60080077164.development"
+      },
+      "timezone": "Asia/Kolkata",
+      "env": [
+        {
+          "idx": 1,
+          "id": "60080077164",
+          "name": "Development",
+          "type": 3
+        }
+      ]
+    }
+  ]
+}
