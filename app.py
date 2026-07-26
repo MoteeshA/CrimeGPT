@@ -1306,6 +1306,10 @@ def dashboard():
         stats = dict(db.execute("SELECT COUNT(*) total, SUM(status='Under Investigation') active, ROUND(AVG(CASE WHEN risk_score>=0 THEN risk_score END),1) avg_risk, SUM(gravity='Heinous') heinous FROM cases").fetchone())
         stats["linked"] = db.execute("SELECT COUNT(*) FROM accused WHERE (SELECT COUNT(*) FROM case_accused WHERE accused_id=accused.id)>1").fetchone()[0]
         rows = db.execute("SELECT incident_date, location, district, minor_head, risk_score FROM cases").fetchall()
+        map_cases = [dict(row) for row in db.execute("""SELECT id, crime_no, case_no, title, location, district, minor_head category,
+            status, incident_date date, incident_time time, latitude lat, longitude lng,
+            CASE WHEN risk_score>=0 THEN risk_score END risk
+            FROM cases WHERE latitude IS NOT NULL AND longitude IS NOT NULL""")]
         hotspots = [dict(row) for row in db.execute("SELECT location, district, COUNT(*) case_count, ROUND(AVG(CASE WHEN risk_score>=0 THEN risk_score END),0) risk FROM cases GROUP BY lower(location), lower(district) ORDER BY case_count DESC, risk DESC LIMIT 5")]
         repeat = [dict(row) for row in db.execute("SELECT a.canonical_name name, COUNT(*) case_count FROM accused a JOIN case_accused ca ON ca.accused_id=a.id GROUP BY a.id HAVING COUNT(*)>1 ORDER BY case_count DESC LIMIT 4")]
     monthly = {}
@@ -1326,7 +1330,7 @@ def dashboard():
         alerts.append({"title": f"Hotspot signal · {item['location']}", "detail": f"{item['case_count']} recorded FIR(s), {risk_detail}. Review patrol coverage and recent link evidence."})
     for item in repeat[:2]:
         alerts.append({"title": f"Repeat-identity signal · {item['name']}", "detail": f"Appears in {item['case_count']} FIRs. This is an analytical lead; identity requires investigator verification."})
-    return render_template("dashboard.html", stats=stats, trend=trend, hotspots=hotspots, alerts=alerts)
+    return render_template("dashboard.html", stats=stats, trend=trend, hotspots=hotspots, alerts=alerts, map_cases=map_cases)
 
 
 @app.route("/case/<int:case_id>")
