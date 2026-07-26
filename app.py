@@ -1178,10 +1178,17 @@ def ask_case(case_id):
     kannada_context_reference = any(term in normalized for term in ["ಅವನ", "ಅದರ", "ಅವು"])
     context_text = f"{previous_user_question} {question}".lower() if english_context_reference or kannada_context_reference else normalized
     linked = linked_cases(case_id)
-    ai_result = grounded_ai_answer(question, case, linked, history)
+    greeting_text = re.sub(r"[^\w\s]", "", normalized, flags=re.UNICODE).strip()
+    greeting_terms = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "namaste", "ನಮಸ್ಕಾರ", "ಹಲೋ", "ಹಾಯ್"}
+    greeting_words = {"hi", "hello", "hey", "namaste", "ನಮಸ್ಕಾರ", "ಹಲೋ", "ಹಾಯ್"}
+    is_greeting = bool(greeting_text) and (greeting_text in greeting_terms or all(part in greeting_words for part in greeting_text.split()))
+    ai_result = None if is_greeting else grounded_ai_answer(question, case, linked, history)
     engine = ai_result.get("engine", "catalyst-quickml") if ai_result else "deterministic-evidence-engine"
     if ai_result:
         answer, evidence, confidence, kind = ai_result["answer"], ai_result["evidence"], ai_result["confidence"], ai_result["kind"]
+    elif is_greeting:
+        answer = "Hello! I’m ready to help with this FIR. You can ask about the incident, accused links, location, legal sections, or supporting evidence."
+        evidence, confidence, kind, engine = [], 100, "Conversation", "conversational-router"
     elif any(term in normalized for term in ["where", "when", "location", "place", "ಎಲ್ಲಿ", "ಯಾವಾಗ"]):
         answer = f"The incident was recorded at {case['location']} on {case['date']} at {case['time']}."
         evidence = [{"table": "CaseMaster", "field": "Location", "value": case["location"], "record": case["crime_no"]}, {"table": "CaseMaster", "field": "IncidentFromDate", "value": f"{case['date']} {case['time']}", "record": case["crime_no"]}]

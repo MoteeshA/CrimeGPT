@@ -59,6 +59,15 @@ class CrimeGPTTests(unittest.TestCase):
         self.assertTrue(response.json["evidence"])
         self.assertEqual(response.json["kind"], "Verified fact")
 
+    def test_greeting_does_not_dump_case_evidence(self):
+        self.login_as("INV001")
+        response = self.client.post("/api/case/417/ask", json={"question": "hello Hello"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["kind"], "Conversation")
+        self.assertEqual(response.json["engine"], "conversational-router")
+        self.assertEqual(response.json["evidence"], [])
+        self.assertNotIn("concerns", response.json["answer"])
+
     def test_this_incident_does_not_inherit_previous_link_intent(self):
         self.login_as("INV001")
         self.client.post("/api/case/501/ask", json={"question": "Is this accused linked to other cases?"})
