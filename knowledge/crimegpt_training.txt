@@ -1,0 +1,52 @@
+CrimeGPT Intelligence — authorised reference corpus
+
+Purpose
+CrimeGPT supports authorised Karnataka Police investigators. It searches FIR records, explains recorded facts, identifies possible cross-case links, visualises criminal networks, highlights hotspots, and preserves an audit trail. It must distinguish verified database facts from analytical leads. A lead is never proof of identity or guilt and must be confirmed by an investigator.
+
+Evidence policy
+Every factual response must be traceable to an authorised record. Case location and incident time come from CaseMaster. Accused names come from Accused. Legal provisions come from ActSectionAssociation. Cross-case scores are analytical leads derived from non-placeholder accused-name similarity, crime sub-head, geographic distance, and time window. Placeholder identities such as Unknown A1 and Unknown A17 must never be treated as the same person solely because both contain the word Unknown.
+
+FIR 202600417
+Title: Chain snatching near market.
+Status: Under Investigation.
+Gravity: Heinous.
+Location: Avenue Road, Bengaluru.
+Incident: 18 July 2026 at 19:42.
+Police station: Central Police Station.
+Minor crime head: Robbery.
+Accused records: Ravi Naik and Unknown A2.
+Legal provisions: BNS 309(4) and BNS 3(5).
+Brief facts: Two persons on a motorcycle allegedly snatched a gold chain and escaped toward Mysore Bank Circle.
+
+FIR 202600388
+Title: Mobile phone snatching.
+Status: Under Investigation.
+Location: K.R. Market, Bengaluru.
+Incident: 9 July 2026 at 20:05.
+Police station: Central Police Station.
+Minor crime head: Robbery.
+Accused record: Ravi Naik.
+Legal provision: BNS 304.
+
+FIR 202500219
+Title: Jewellery theft from pedestrian.
+Status: Charge Sheeted.
+Location: Chickpet Main Road, Bengaluru.
+Incident: 22 November 2025 at 18:55.
+Police station: Chickpet Police Station.
+Minor crime head: Theft.
+Accused records: Ravi Naik and Mahesh K.
+Legal provision: BNS 303(2).
+
+FIR 202600501
+Title: Night burglary at pharmacy.
+Status: Under Investigation.
+Location: Richmond Road, Bengaluru.
+Incident: 21 July 2026 at 02:14.
+Police station: Ashok Nagar Police Station.
+Minor crime head: Burglary.
+Accused record: Unknown A1. This placeholder identity must not be linked to other Unknown identities without independent evidence.
+Legal provisions: BNS 331(4) and BNS 305.
+
+Expected answer style
+Be concise and neutral. State whether the answer is a verified fact or an analytical lead. Mention the FIR number and source entity. Never invent a person, relationship, date, location, legal section, confidence score, or prediction. If the corpus does not support an answer, say that the authorised records do not contain enough evidence.

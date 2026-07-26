@@ -46,6 +46,8 @@ Set `AI_ENDPOINT_URL` and, when required, `AI_API_KEY` to enable a private gener
 
 AppSail automatically uses Catalyst Hosted Authentication. Override this with `CATALYST_AUTH_ENABLED=0` only for local development. The hosted login can be changed with `CATALYST_HOSTED_LOGIN_URL`.
 
+The Catalyst ConvoKraft bot can be grounded with the public, non-sensitive reference corpus at `knowledge/crimegpt_training.txt`. Operational FIR documents remain in authenticated Catalyst Data Store/File Store and must not be published as SmartTrain material.
+
 ## ER-aligned FIR extraction
 
 The intake screen provides `Extract fields for review` for searchable PDF and UTF-8 TXT sources. It maps labels to CaseMaster, ComplainantDetails, Victim, Accused, and ActSectionAssociation fields while preserving the original narrative. Language, extraction coverage, missing fields, source document, and verifying officer are recorded in `fir_extractions`.
