@@ -1397,7 +1397,9 @@ def ask_case(case_id):
         confidence, kind = 100, "Verified fact"
     audit("AI_QUERY", "CASE", f"{case['crime_no']} · {question[:80]}")
     store_message(conversation["id"], "assistant", answer, question_language, kind, confidence, evidence)
-    return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "engine": engine, "conversation_id": conversation["id"], "context_used": bool(previous_user_question and context_text != normalized), "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "minor": item["minor"], "score": item["link_score"], "reasons": item["link_reasons"]} for item in linked]})
+    graph_terms = ("related", "linked", "connection", "network", "similar", "other case", "pattern", "accused", "nearby", "ಸಂಬಂಧ")
+    graph_expand = not is_greeting and (any(term in context_text for term in graph_terms) or bool(ai_result and len(ai_result.get("evidence_ids", [])) > 1))
+    return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "engine": engine, "conversation_id": conversation["id"], "context_used": bool(previous_user_question and context_text != normalized), "graph_expand": graph_expand, "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "title": item["title"], "minor": item["minor"], "location": item["location"], "date": item["date"], "score": item["link_score"], "reasons": item["link_reasons"], "url": url_for("case_board", case_id=item["id"])} for item in linked]})
 
 
 @app.post("/api/analytics/ask")
@@ -1449,7 +1451,10 @@ def expand_graph(case_id):
     value = str(payload.get("value", "")).strip()
     matches = []
     with get_db() as db:
-        if node_type == "location":
+        if node_type == "case":
+            for item in linked_cases(case_id):
+                matches.append((item, "; ".join(item["link_reasons"][:2]), item["link_score"]))
+        elif node_type == "location":
             rows = db.execute("SELECT * FROM cases WHERE id<>? AND latitude IS NOT NULL AND longitude IS NOT NULL", (case_id,)).fetchall()
             for row in rows:
                 candidate = case_from_row(row, db)
