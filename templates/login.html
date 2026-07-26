@@ -397,6 +397,28 @@
             text-align: center;
         }
 
+        .catalyst-login {
+            min-height: 390px;
+            margin-top: 22px;
+            overflow: hidden;
+            border: 1px solid #d9e2ec;
+            border-radius: 12px;
+            background: #fff;
+        }
+
+        .catalyst-login iframe {
+            width: 100% !important;
+            min-height: 390px !important;
+            border: 0 !important;
+        }
+
+        .auth-loading {
+            padding: 28px;
+            color: var(--muted);
+            font-size: 13px;
+            text-align: center;
+        }
+
         .notice svg {
             width: 17px;
             height: 17px;
@@ -532,6 +554,11 @@
                 <p class="welcome-copy">Sign in with your authorised department credentials to continue.</p>
 
                 {% if error %}<div class="error-message" role="alert">{{ error }}</div>{% endif %}
+                {% if catalyst_auth %}
+                <div id="catalyst-login" class="catalyst-login" aria-label="Catalyst secure sign in">
+                    <div class="auth-loading">Loading secure department sign-in…</div>
+                </div>
+                {% else %}
                 <form action="{{ url_for('login') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <div class="field">
                         <label for="officer-id">Officer ID / KGID</label>
@@ -573,6 +600,7 @@
                 </form>
 
                 <p class="demo-access">Demo access: INV001 / demo123</p>
+                {% endif %}
 
                 <div class="notice">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -585,6 +613,19 @@
         </section>
     </main>
 
+    {% if catalyst_auth %}
+    <script src="https://static.zohocdn.com/catalyst/sdk/js/4.4.0/catalystWebSDK.js"></script>
+    <script src="/__catalyst/sdk/init.js"></script>
+    <script>
+        catalyst.auth.signIn('catalyst-login');
+        const authCheck = window.setInterval(() => {
+            catalyst.auth.isUserAuthenticated().then(() => {
+                window.clearInterval(authCheck);
+                window.location.replace('{{ url_for("workspace") }}');
+            }).catch(() => {});
+        }, 1200);
+    </script>
+    {% else %}
     <script>
         const passwordInput = document.querySelector('#password');
         const toggleButton = document.querySelector('.toggle-password');
@@ -596,5 +637,6 @@
             toggleButton.setAttribute('aria-pressed', String(isHidden));
         });
     </script>
+    {% endif %}
 </body>
 </html>

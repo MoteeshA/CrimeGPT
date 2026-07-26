@@ -352,8 +352,6 @@ def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         if not current_user():
-            if catalyst_auth_enabled() and CATALYST_HOSTED_LOGIN_URL:
-                return redirect(CATALYST_HOSTED_LOGIN_URL)
             return redirect(url_for("login"))
         return view(*args, **kwargs)
     return wrapped
@@ -762,7 +760,7 @@ def login():
         user = current_user()
         if user:
             return redirect(url_for("workspace"))
-        return redirect(CATALYST_HOSTED_LOGIN_URL)
+        return render_template("login.html", error=None, catalyst_auth=True)
     if current_user() and request.method == "GET":
         return redirect(url_for("workspace"))
     error = None
@@ -779,7 +777,7 @@ def login():
             audit("LOGIN", "AUTH", "Successful demo login")
             return redirect(url_for("workspace"))
         error = "Officer ID or password is incorrect."
-    return render_template("login.html", error=error)
+    return render_template("login.html", error=error, catalyst_auth=False)
 
 
 @app.route("/logout")
