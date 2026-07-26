@@ -4,7 +4,7 @@
     "env": 1
   },
   "actives": {
-    "project": 1,
+    "project": 3,
     "env": 1
   },
   "projects": [
@@ -21,6 +21,42 @@
         {
           "idx": 1,
           "id": "60080077164",
+          "name": "Development",
+          "type": 3
+        }
+      ]
+    },
+    {
+      "idx": 2,
+      "id": "48142000000013051",
+      "name": "CrimeGPT",
+      "domain": {
+        "id": "50044361591",
+        "name": "crimegpt-60080160471.development"
+      },
+      "timezone": "Asia/Kolkata",
+      "env": [
+        {
+          "idx": 1,
+          "id": "60080160471",
+          "name": "Development",
+          "type": 3
+        }
+      ]
+    },
+    {
+      "idx": 3,
+      "id": "48142000000019001",
+      "name": "CrimeGPT-Production",
+      "domain": {
+        "id": "50044362234",
+        "name": "crimegpt-production-60080160471.development"
+      },
+      "timezone": "Asia/Kolkata",
+      "env": [
+        {
+          "idx": 1,
+          "id": "60080160471",
           "name": "Development",
           "type": 3
         }

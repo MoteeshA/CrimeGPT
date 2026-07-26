@@ -39,7 +39,7 @@ DB_PATH = Path(os.environ.get("DATABASE_PATH", Path(__file__).with_name("ksp_int
 CLOUD_SYNC_LOCK = threading.Lock()
 CLOUD_HYDRATED = False
 CATALYST_HOSTED_LOGIN_URL = os.environ.get(
-    "CATALYST_HOSTED_LOGIN_URL",
+    "KSP_HOSTED_LOGIN_URL",
     "https://crimegpt-60080077164.development.catalystserverless.in/__catalyst/auth/login",
 ).strip()
 
@@ -322,6 +322,13 @@ def hydrate_cases_from_cloud():
         if CLOUD_HYDRATED:
             return
         rows = cloud_rows("CaseMaster")
+        if not rows and env_flag("MIGRATE_LOCAL_CASES_TO_CLOUD"):
+            with get_db() as seed_db:
+                local_cases = [case_from_row(row, seed_db) for row in seed_db.execute("SELECT * FROM cases ORDER BY id")]
+            for local_case in local_cases:
+                cloud_upsert("CaseMaster", local_case["crime_no"], local_case)
+            rows = cloud_rows("CaseMaster")
+            app.logger.info("Migrated %s local CaseMaster records to Catalyst Data Store", len(local_cases))
         with get_db() as db:
             for row in rows:
                 try:
