@@ -419,6 +419,20 @@
             text-align: center;
         }
 
+        .auth-fallback {
+            display: none;
+            width: 100%;
+            margin-top: 14px;
+            padding: 13px 18px;
+            border: 0;
+            border-radius: 8px;
+            color: #fff;
+            background: var(--navy);
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
         .notice svg {
             width: 17px;
             height: 17px;
@@ -558,6 +572,7 @@
                 <div id="catalyst-login" class="catalyst-login" aria-label="Catalyst secure sign in">
                     <div class="auth-loading">Loading secure department sign-in…</div>
                 </div>
+                <button id="auth-fallback" class="auth-fallback" type="button">Continue to secure sign-in</button>
                 {% else %}
                 <form action="{{ url_for('login') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <div class="field">
@@ -618,6 +633,25 @@
     <script src="/__catalyst/sdk/init.js"></script>
     <script>
         catalyst.auth.signIn('catalyst-login');
+        const fallbackButton = document.querySelector('#auth-fallback');
+        const openCatalystSignIn = () => {
+            const frame = document.querySelector('#catalyst-login iframe');
+            if (frame && frame.src) window.location.assign(frame.src);
+        };
+        fallbackButton.addEventListener('click', openCatalystSignIn);
+
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+        const iframeReady = window.setInterval(() => {
+            const frame = document.querySelector('#catalyst-login iframe');
+            if (!frame || !frame.src) return;
+            window.clearInterval(iframeReady);
+            if (isSafari) {
+                openCatalystSignIn();
+            } else {
+                fallbackButton.style.display = 'block';
+            }
+        }, 200);
+
         const authCheck = window.setInterval(() => {
             catalyst.auth.isUserAuthenticated().then(() => {
                 window.clearInterval(authCheck);
