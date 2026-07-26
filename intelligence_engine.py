@@ -223,7 +223,7 @@ class CatalystQuickMLEngine:
         catalogue = [self._safe_record(item) for item in retrieved]
         allowed_ids = {item["evidence_id"] for item in catalogue}
         prompt = {
-            "system": "You are a police intelligence analyst. Use ONLY supplied records. Never invent a case number, identity, location or relationship. Unknown identities are already removed and must not be inferred. Return strict JSON: answer, kind (Verified fact or Analytical lead), confidence (0-100), evidence_ids (non-empty subset of supplied evidence_id values).",
+            "system": "You are a police intelligence analyst. Use ONLY supplied records. Never invent a case number, identity, location or relationship. Unknown identities are already removed and must not be inferred. Answer in the same language as the user's question; when the question uses Kannada script, the answer text must be in natural Kannada. Keep official FIR numbers, names, locations and legal section identifiers unchanged. Return strict JSON: answer, kind (Verified fact or Analytical lead), confidence (0-100), evidence_ids (non-empty subset of supplied evidence_id values).",
             "intent": classify_query(question), "question": question,
             "conversation_context": (history or [])[-6:], "authorised_retrieved_records": catalogue,
         }

@@ -120,6 +120,7 @@ class CrimeGPTTests(unittest.TestCase):
         response = self.client.post("/api/case/417/ask", json={"question": "ಈ ಘಟನೆ ಎಲ್ಲಿ ನಡೆಯಿತು?"})
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json["evidence"])
+        self.assertIn("ಈ ಘಟನೆಯು", response.json["answer"])
 
     def test_pdf_export_is_a_real_pdf(self):
         self.login_as("INV001")

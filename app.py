@@ -1387,6 +1387,7 @@ def ask_case(case_id):
     history = conversation_history(conversation["id"])
     previous_user_question = next((item["content"] for item in reversed(history) if item["role"] == "user"), "")
     question_language = detect_language(question)
+    answer_in_kannada = question_language == "Kannada"
     store_message(conversation["id"], "user", question, question_language)
     normalized = question.lower()
     english_context_reference = re.search(r"\b(?:his|her|their|that|those|it)\b", normalized)
@@ -1402,27 +1403,27 @@ def ask_case(case_id):
     if ai_result:
         answer, evidence, confidence, kind = ai_result["answer"], ai_result["evidence"], ai_result["confidence"], ai_result["kind"]
     elif is_greeting:
-        answer = "Hello! I’m ready to help with this FIR. You can ask about the incident, accused links, location, legal sections, or supporting evidence."
+        answer = "ನಮಸ್ಕಾರ! ಈ ಎಫ್‌ಐಆರ್ ಕುರಿತು ಸಹಾಯ ಮಾಡಲು ನಾನು ಸಿದ್ಧನಿದ್ದೇನೆ. ಘಟನೆ, ಆರೋಪಿಗಳ ಸಂಪರ್ಕ, ಸ್ಥಳ, ಕಾನೂನು ಕಲಂಗಳು ಅಥವಾ ಆಧಾರಗಳ ಬಗ್ಗೆ ಕೇಳಬಹುದು." if answer_in_kannada else "Hello! I’m ready to help with this FIR. You can ask about the incident, accused links, location, legal sections, or supporting evidence."
         evidence, confidence, kind, engine = [], 100, "Conversation", "conversational-router"
     elif any(term in normalized for term in ["where", "when", "location", "place", "ಎಲ್ಲಿ", "ಯಾವಾಗ"]):
-        answer = f"The incident was recorded at {case['location']} on {case['date']} at {case['time']}."
+        answer = (f"ಈ ಘಟನೆಯು {case['location']} ನಲ್ಲಿ {case['date']} ರಂದು {case['time']} ಸಮಯಕ್ಕೆ ದಾಖಲಾಗಿದೆ." if answer_in_kannada else f"The incident was recorded at {case['location']} on {case['date']} at {case['time']}.")
         evidence = [{"table": "CaseMaster", "field": "Location", "value": case["location"], "record": case["crime_no"]}, {"table": "CaseMaster", "field": "IncidentFromDate", "value": f"{case['date']} {case['time']}", "record": case["crime_no"]}]
         confidence, kind = 100, "Verified fact"
     elif any(term in context_text for term in ["other case", "repeat", "linked", "history", "ಹಿಂದಿನ"]):
         if linked:
             names = ", ".join(f"FIR {item['case_no']} ({item['link_score']}% link score)" for item in linked[:4])
-            answer = f"Explainable cross-case leads found: {names}. Scores combine accused-name similarity, crime sub-head, distance and time window; identity must still be confirmed by an investigator."
+            answer = (f"ವಿವರಿಸಬಹುದಾದ ಅಂತರ-ಪ್ರಕರಣ ಸುಳಿವುಗಳು ಕಂಡುಬಂದಿವೆ: {names}. ಈ ಅಂಕಗಳು ಆರೋಪಿಯ ಹೆಸರಿನ ಸಾಮ್ಯತೆ, ಅಪರಾಧದ ಉಪವರ್ಗ, ಅಂತರ ಮತ್ತು ಸಮಯದ ಅವಧಿಯನ್ನು ಸಂಯೋಜಿಸುತ್ತವೆ; ಗುರುತನ್ನು ತನಿಖಾಧಿಕಾರಿ ಇನ್ನೂ ದೃಢೀಕರಿಸಬೇಕು." if answer_in_kannada else f"Explainable cross-case leads found: {names}. Scores combine accused-name similarity, crime sub-head, distance and time window; identity must still be confirmed by an investigator.")
             evidence = [{**entry, "record": f"FIR {item['case_no']} · {'; '.join(item['link_reasons'])}"} for item in linked[:4] for entry in item["link_evidence"]]
             confidence = linked[0]["link_score"]
             kind = "Analytical lead"
         else:
-            answer, evidence, confidence, kind = "No linked case was found in the current authorised dataset.", [{"table": "Accused", "field": "CaseMasterID", "value": str(case_id), "record": "Current case"}], 100, "Verified fact"
+            answer, evidence, confidence, kind = ("ಪ್ರಸ್ತುತ ಅಧಿಕೃತ ದತ್ತಾಂಶದಲ್ಲಿ ಸಂಪರ್ಕಿತ ಪ್ರಕರಣ ಕಂಡುಬಂದಿಲ್ಲ." if answer_in_kannada else "No linked case was found in the current authorised dataset."), [{"table": "Accused", "field": "CaseMasterID", "value": str(case_id), "record": "Current case"}], 100, "Verified fact"
     elif any(term in context_text for term in ["section", "act", "charge", "ಕಲಂ"]):
-        answer = "Recorded legal provisions: " + ", ".join(case["acts"]) + "."
+        answer = (("ದಾಖಲಾದ ಕಾನೂನು ಕಲಂಗಳು: " if answer_in_kannada else "Recorded legal provisions: ") + ", ".join(case["acts"]) + ".")
         evidence = [{"table": "ActSectionAssociation", "field": "ActID / SectionID", "value": act, "record": case["crime_no"]} for act in case["acts"]]
         confidence, kind = 100, "Verified fact"
     else:
-        answer = f"FIR {case['case_no']} concerns {case['minor'].lower()} at {case['location']}. It is {case['status'].lower()} and lists {len(case['accused'])} accused record(s). Ask about linked cases, location, or legal sections for a sourced answer."
+        answer = (f"ಎಫ್‌ಐಆರ್ {case['case_no']} ಪ್ರಕರಣವು {case['location']} ನಲ್ಲಿ ನಡೆದ {case['minor']} ಅಪರಾಧಕ್ಕೆ ಸಂಬಂಧಿಸಿದೆ. ಪ್ರಕರಣದ ಸ್ಥಿತಿ: {case['status']}; ಇದರಲ್ಲಿ {len(case['accused'])} ಆರೋಪಿ ದಾಖಲೆಗಳಿವೆ. ಆಧಾರಸಹಿತ ಉತ್ತರಕ್ಕಾಗಿ ಸಂಪರ್ಕಿತ ಪ್ರಕರಣಗಳು, ಸ್ಥಳ ಅಥವಾ ಕಾನೂನು ಕಲಂಗಳ ಬಗ್ಗೆ ಕೇಳಿ." if answer_in_kannada else f"FIR {case['case_no']} concerns {case['minor'].lower()} at {case['location']}. It is {case['status'].lower()} and lists {len(case['accused'])} accused record(s). Ask about linked cases, location, or legal sections for a sourced answer.")
         evidence = [{"table": "CaseMaster", "field": "BriefFacts", "value": case["brief"], "record": case["crime_no"]}, {"table": "CaseStatusMaster", "field": "CaseStatusName", "value": case["status"], "record": case["crime_no"]}]
         confidence, kind = 100, "Verified fact"
     audit("AI_QUERY", "CASE", f"{case['crime_no']} · {question[:80]}")
