@@ -146,7 +146,7 @@ class CrimeGPTTests(unittest.TestCase):
     def test_permissions_are_role_specific(self):
         self.login_as("POL001")
         response = self.client.get("/api/admin/permissions")
-        self.assertEqual(response.json["permissions"], ["aggregate-dashboard:read"])
+        self.assertEqual(response.json["permissions"], ["aggregate-dashboard:read", "demographics:aggregate", "early-warning:read"])
         self.assertIsNone(response.json["matrix"])
 
     def test_public_reference_risk_is_not_presented_as_assessed(self):
@@ -157,6 +157,50 @@ class CrimeGPTTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Not assessed", response.data)
         self.assertNotIn(b"90/100", response.data)
+
+    def test_demographic_analytics_suppresses_small_groups(self):
+        self.login_as("ANL001")
+        for case_id in (417, 388):
+            response = self.client.post(f"/api/admin/case/{case_id}/demographics", json={"age_band": "25-34", "gender": "female", "locality_type": "urban", "occupation_group": "service"})
+            self.assertEqual(response.status_code, 201)
+        response = self.client.get("/api/analytics/socio-demographics?dimension=age_band")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["groups"], [])
+        self.assertEqual(response.json["suppressed_record_count"], 2)
+        self.assertFalse(response.json["individual_records_exposed"])
+
+    def test_behavioral_profile_rejects_unknown_and_describes_known_identity(self):
+        self.login_as("ANL001")
+        self.assertEqual(self.client.post("/api/analytics/behavioral-profile", json={"identity": "Unknown A1"}).status_code, 400)
+        response = self.client.post("/api/analytics/behavioral-profile", json={"identity": "Ravi Naik"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["classification"], "descriptive-record-pattern")
+        self.assertGreaterEqual(response.json["record_count"], 2)
+        self.assertTrue(response.json["evidence_ids"])
+
+    def test_early_warning_feed_is_human_review_only(self):
+        self.login_as("SUP001")
+        response = self.client.get("/api/alerts/early-warning")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json["automated_enforcement"])
+
+    def test_only_supervisor_can_confirm_model_outcome(self):
+        with crimegpt.get_db() as db:
+            db.execute("INSERT INTO model_predictions(case_id,model_version,score,features_json,explanation_json,created_at) VALUES (?,?,?,?,?,?)", (417, "test", 82, "{}", "{}", "2026-07-26T00:00:00"))
+        self.login_as("ANL001")
+        self.assertEqual(self.client.post("/api/model/outcome/417", json={"outcome": True}).status_code, 403)
+        self.login_as("SUP001")
+        response = self.client.post("/api/model/outcome/417", json={"outcome": True})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["status"], "evaluation-label-only")
+
+    def test_production_readiness_never_claims_unapproved_external_gates(self):
+        self.login_as("SUP001")
+        response = self.client.get("/api/admin/production-readiness")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["status"], "gated")
+        self.assertFalse(response.json["all_gates_complete"])
+        self.assertIn("legal_privacy_review", response.json["checks"])
 
 
 if __name__ == "__main__":

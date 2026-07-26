@@ -1,4 +1,5 @@
 from datetime import datetime
+from collections import Counter
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
@@ -247,6 +248,21 @@ def init_db():
                 outcome INTEGER,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS case_demographics (
+                case_id INTEGER PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,
+                age_band TEXT,
+                gender TEXT,
+                occupation_group TEXT,
+                locality_type TEXT,
+                verified_by TEXT NOT NULL,
+                verified_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS access_scopes (
+                officer_id TEXT NOT NULL REFERENCES users(officer_id) ON DELETE CASCADE,
+                scope_type TEXT NOT NULL CHECK(scope_type IN ('station','district')),
+                scope_value TEXT NOT NULL,
+                PRIMARY KEY(officer_id, scope_type, scope_value)
+            );
         """)
         if demo_seed_enabled() and db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             db.executemany(
@@ -482,8 +498,12 @@ def ready():
                 cloud_status = "available"
             except Exception:
                 cloud_status = "unavailable"
+        quickml = {
+            "llm_serving": "configured" if all(os.environ.get(key) for key in ("QUICKML_LLM_ENDPOINT_URL", "QUICKML_ORG_ID", "QUICKML_ENDPOINT_KEY", "QUICKML_OAUTH_ACCESS_TOKEN")) else "not-configured",
+            "rag": "configured" if os.environ.get("QUICKML_RAG_ENDPOINT_URL") and os.environ.get("QUICKML_RAG_RECORD_DOCUMENT_MAP") else "not-configured",
+        }
         status = "ready" if cloud_status != "unavailable" else "degraded"
-        return jsonify({"status": status, "database": "available", "catalyst_datastore": cloud_status}), 200 if status == "ready" else 503
+        return jsonify({"status": status, "database": "available", "catalyst_datastore": cloud_status, "quickml": quickml}), 200 if status == "ready" else 503
     except sqlite3.Error:
         app.logger.exception("Readiness database check failed")
         return jsonify({"status": "not-ready", "database": "unavailable"}), 503
@@ -1067,12 +1087,37 @@ def import_cctns():
 @login_required
 def permission_matrix():
     matrix = {
-        "investigator": ["cases:read", "fir:create", "intelligence:query", "graph:explore", "conversation:export"],
-        "analyst": ["cases:read", "fir:create", "dataset:import", "intelligence:query", "graph:explore", "conversation:export", "audit:read", "metrics:read"],
-        "supervisor": ["cases:read", "intelligence:query", "graph:explore", "conversation:export", "audit:read", "metrics:read", "backup:export", "retention:execute"],
-        "policymaker": ["aggregate-dashboard:read"],
+        "investigator": ["cases:read", "fir:create", "intelligence:query", "graph:explore", "behavioral-pattern:read", "early-warning:read", "conversation:export"],
+        "analyst": ["cases:read", "fir:create", "dataset:import", "intelligence:query", "graph:explore", "behavioral-pattern:read", "demographics:verify", "demographics:aggregate", "early-warning:read", "conversation:export", "audit:read", "metrics:read"],
+        "supervisor": ["cases:read", "intelligence:query", "graph:explore", "behavioral-pattern:read", "demographics:verify", "demographics:aggregate", "early-warning:read", "model-outcome:confirm", "conversation:export", "audit:read", "metrics:read", "backup:export", "retention:execute", "readiness:read"],
+        "policymaker": ["aggregate-dashboard:read", "demographics:aggregate", "early-warning:read"],
     }
     return jsonify({"role": current_user()["role"], "permissions": matrix[current_user()["role"]], "matrix": matrix if current_user()["role"] == "supervisor" else None})
+
+
+@app.get("/api/admin/production-readiness")
+@roles_required("supervisor")
+def production_readiness():
+    quickml_llm = all(os.environ.get(key) for key in ("QUICKML_LLM_ENDPOINT_URL", "QUICKML_ORG_ID", "QUICKML_ENDPOINT_KEY", "QUICKML_OAUTH_ACCESS_TOKEN"))
+    quickml_rag = quickml_llm and bool(os.environ.get("QUICKML_RAG_ENDPOINT_URL") and os.environ.get("QUICKML_RAG_RECORD_DOCUMENT_MAP"))
+    with get_db() as db:
+        case_count = db.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
+        labels = db.execute("SELECT COUNT(*) FROM model_predictions WHERE outcome IS NOT NULL").fetchone()[0]
+        demographics = db.execute("SELECT COUNT(*) FROM case_demographics").fetchone()[0]
+    checks = {
+        "quickml_llm_serving": {"complete": quickml_llm, "owner": "Catalyst organisation administrator"},
+        "quickml_rag_index": {"complete": quickml_rag, "owner": "SCRB data/ML administrator"},
+        "authorised_dataset": {"complete": case_count >= int(os.environ.get("PRODUCTION_MIN_CASES", "10000")), "records": case_count, "owner": "SCRB"},
+        "prediction_validation": {"complete": labels >= int(os.environ.get("MODEL_MIN_LABELS", "500")), "confirmed_labels": labels, "owner": "Model governance board"},
+        "demographic_coverage": {"complete": demographics >= int(os.environ.get("DEMOGRAPHIC_MIN_RECORDS", "500")), "verified_records": demographics, "owner": "SCRB data steward"},
+        "security_review": {"complete": env_flag("SECURITY_REVIEW_APPROVED"), "owner": "KSP security"},
+        "legal_privacy_review": {"complete": env_flag("LEGAL_REVIEW_APPROVED"), "owner": "KSP legal/privacy"},
+        "load_test_1100_stations": {"complete": env_flag("LOAD_TEST_APPROVED"), "owner": "Platform operations"},
+        "backup_restore_drill": {"complete": env_flag("BACKUP_RESTORE_APPROVED"), "owner": "Platform operations"},
+    }
+    complete = all(item["complete"] for item in checks.values())
+    audit("PRODUCTION_READINESS_VIEW", "GOVERNANCE", f"complete={complete}")
+    return jsonify({"status": "approved-for-production" if complete else "gated", "all_gates_complete": complete, "checks": checks})
 
 
 @app.get("/api/admin/backup")
@@ -1111,6 +1156,93 @@ def model_evaluation():
     tp=sum(p and y for p,y in labels); fp=sum(p and not y for p,y in labels); tn=sum(not p and not y for p,y in labels); fn=sum(not p and y for p,y in labels)
     safe_div=lambda a,b: round(a/b,4) if b else None
     return jsonify({"status":"evaluation-only","labels":len(labels),"threshold":70,"precision":safe_div(tp,tp+fp),"recall":safe_div(tp,tp+fn),"false_positive_rate":safe_div(fp,fp+tn),"confusion_matrix":{"tp":tp,"fp":fp,"tn":tn,"fn":fn}})
+
+
+@app.post("/api/model/outcome/<int:case_id>")
+@roles_required("supervisor")
+def record_model_outcome(case_id):
+    payload = request.get_json(silent=True) or {}
+    if payload.get("outcome") not in (True, False, 0, 1):
+        return jsonify({"error": "outcome must be a confirmed boolean"}), 400
+    with get_db() as db:
+        prediction = db.execute("SELECT id FROM model_predictions WHERE case_id=? ORDER BY id DESC LIMIT 1", (case_id,)).fetchone()
+        if not prediction:
+            return jsonify({"error": "No recorded prediction for this case"}), 404
+        db.execute("UPDATE model_predictions SET outcome=? WHERE id=?", (int(bool(payload["outcome"])), prediction["id"]))
+    audit("MODEL_OUTCOME_CONFIRMED", "CASE", f"case={case_id} outcome={int(bool(payload['outcome']))}")
+    return jsonify({"case_id": case_id, "outcome_recorded": bool(payload["outcome"]), "status": "evaluation-label-only"})
+
+
+@app.post("/api/admin/case/<int:case_id>/demographics")
+@roles_required("analyst", "supervisor")
+def record_case_demographics(case_id):
+    payload = request.get_json(silent=True) or {}
+    allowed = {
+        "age_band": {"child", "18-24", "25-34", "35-44", "45-59", "60+", "not-recorded"},
+        "gender": {"female", "male", "non-binary", "not-disclosed", "not-recorded"},
+        "locality_type": {"urban", "semi-urban", "rural", "not-recorded"},
+    }
+    values = {key: str(payload.get(key, "not-recorded")).strip().lower() for key in allowed}
+    invalid = [key for key, value in values.items() if value not in allowed[key]]
+    if invalid:
+        return jsonify({"error": f"Invalid controlled value for {', '.join(invalid)}"}), 400
+    occupation = re.sub(r"[^a-zA-Z -]", "", str(payload.get("occupation_group", "not-recorded"))).strip().lower()[:60] or "not-recorded"
+    with get_db() as db:
+        if not db.execute("SELECT 1 FROM cases WHERE id=?", (case_id,)).fetchone():
+            return jsonify({"error": "Case not found"}), 404
+        db.execute("""INSERT OR REPLACE INTO case_demographics(case_id,age_band,gender,occupation_group,locality_type,verified_by,verified_at)
+                      VALUES (?,?,?,?,?,?,?)""", (case_id, values["age_band"], values["gender"], occupation, values["locality_type"], current_user()["id"], datetime.now().isoformat()))
+    audit("DEMOGRAPHICS_VERIFIED", "CASE", f"case={case_id}; controlled aggregate attributes only")
+    return jsonify({"case_id": case_id, **values, "occupation_group": occupation, "status": "verified"}), 201
+
+
+@app.get("/api/analytics/socio-demographics")
+@roles_required("analyst", "supervisor", "policymaker")
+def socio_demographic_analytics():
+    dimension = request.args.get("dimension", "age_band")
+    allowed = {"age_band", "gender", "occupation_group", "locality_type"}
+    if dimension not in allowed:
+        return jsonify({"error": "Unsupported aggregate dimension"}), 400
+    privacy_minimum = max(3, int(os.environ.get("DEMOGRAPHIC_K_ANONYMITY", "5")))
+    with get_db() as db:
+        rows = db.execute(f"SELECT {dimension} label, COUNT(*) count FROM case_demographics GROUP BY {dimension} ORDER BY count DESC").fetchall()
+    visible = [{"label": row["label"], "count": row["count"]} for row in rows if row["count"] >= privacy_minimum]
+    suppressed = sum(row["count"] for row in rows if row["count"] < privacy_minimum)
+    audit("DEMOGRAPHIC_AGGREGATE", "PRIVACY_SAFE", f"dimension={dimension}; k={privacy_minimum}; suppressed={suppressed}")
+    return jsonify({"dimension": dimension, "groups": visible, "suppressed_record_count": suppressed, "privacy_threshold": privacy_minimum, "individual_records_exposed": False})
+
+
+@app.post("/api/analytics/behavioral-profile")
+@roles_required("investigator", "analyst", "supervisor")
+def behavioral_profile():
+    identity = str((request.get_json(silent=True) or {}).get("identity", "")).strip()
+    if not identity or is_placeholder_identity(identity):
+        return jsonify({"error": "A confirmed, non-placeholder identity is required"}), 400
+    with get_db() as db:
+        rows = db.execute("""SELECT c.* FROM cases c JOIN case_accused ca ON ca.case_id=c.id JOIN accused a ON a.id=ca.accused_id
+                             WHERE a.identity_key=? ORDER BY c.incident_date""", (normalize_person_name(identity).replace(" ", ""),)).fetchall()
+        cases = [case_from_row(row, db) for row in rows]
+    if not cases:
+        return jsonify({"error": "No authorised records for this identity"}), 404
+    offences = Counter(item["minor"] for item in cases); districts = Counter(item["district"] for item in cases)
+    time_bands = Counter("night" if int(item["time"][:2]) >= 22 or int(item["time"][:2]) < 5 else "day/evening" for item in cases if re.match(r"^\d{2}:\d{2}$", item["time"]))
+    evidence_ids = [item["crime_no"] for item in cases]
+    audit("BEHAVIORAL_PROFILE", "CONFIRMED_IDENTITY", f"identity={identity}; evidence={','.join(evidence_ids)}")
+    return jsonify({"identity": identity, "record_count": len(cases), "offence_patterns": dict(offences), "district_patterns": dict(districts), "time_patterns": dict(time_bands), "evidence_ids": evidence_ids, "classification": "descriptive-record-pattern", "warning": "This is not a psychological profile or prediction of future conduct."})
+
+
+@app.get("/api/alerts/early-warning")
+@roles_required("investigator", "analyst", "supervisor", "policymaker")
+def early_warning_feed():
+    minimum_cluster = max(2, int(os.environ.get("EARLY_WARNING_CLUSTER_MIN", "3")))
+    with get_db() as db:
+        places = db.execute("SELECT location,district,COUNT(*) count FROM cases GROUP BY lower(location),lower(district) HAVING COUNT(*)>=? ORDER BY count DESC", (minimum_cluster,)).fetchall()
+        identities = db.execute("""SELECT a.canonical_name identity,COUNT(*) count FROM accused a JOIN case_accused ca ON ca.accused_id=a.id
+                                   GROUP BY a.id HAVING COUNT(*)>=? ORDER BY count DESC""", (minimum_cluster,)).fetchall()
+    alerts = [{"type": "hotspot-cluster", "label": row["location"], "district": row["district"], "record_count": row["count"], "status": "human-review-required"} for row in places]
+    alerts += [{"type": "repeat-confirmed-identity", "label": row["identity"], "record_count": row["count"], "status": "human-review-required"} for row in identities if not is_placeholder_identity(row["identity"])]
+    audit("EARLY_WARNING_VIEW", "AGGREGATE_SIGNALS", f"alerts={len(alerts)} threshold={minimum_cluster}")
+    return jsonify({"alerts": alerts, "threshold": minimum_cluster, "automated_enforcement": False, "generated_at": datetime.now().isoformat()})
 
 
 @app.route("/dashboard")

@@ -90,5 +90,18 @@ Operational endpoints are role protected:
 - `GET /api/metrics` — request latency/error telemetry for analysts and supervisors.
 - `GET /api/admin/backup` — supervisor-only consistent snapshot.
 - `POST /api/admin/retention` — supervisor-only audited conversation retention.
+- `GET /api/admin/production-readiness` — authoritative technical and external-approval gates; never silently claims production readiness.
+- `POST /api/admin/case/<id>/demographics` and `GET /api/analytics/socio-demographics` — verified controlled attributes with k-anonymity suppression.
+- `POST /api/analytics/behavioral-profile` — descriptive patterns for confirmed identities only; never psychological profiling.
+- `GET /api/alerts/early-warning` — hotspot/repeat-identity signals explicitly requiring human review.
+- `POST /api/model/outcome/<id>` — supervisor-confirmed outcome labels for evaluation, not automatic retraining.
+
+Run the staging load harness with `TARGET_URL`, `REQUESTS`, and `CONCURRENCY`, for example:
+
+```bash
+TARGET_URL=https://staging.example REQUESTS=500 CONCURRENCY=25 python tests/load_test.py
+```
+
+Only an approved representative-data run may set `LOAD_TEST_APPROVED=1`. Security, legal, restore-drill, dataset-size, demographic-coverage, and model-label gates are independently reported by the production-readiness endpoint.
 
 See `PRODUCTION_READINESS.md` for environment settings, load-test acceptance criteria, model validation, security operations and the external SCRB/legal approval gates.
