@@ -131,6 +131,15 @@ class CrimeGPTTests(unittest.TestCase):
         self.assertEqual(response.json["permissions"], ["aggregate-dashboard:read"])
         self.assertIsNone(response.json["matrix"])
 
+    def test_public_reference_risk_is_not_presented_as_assessed(self):
+        with crimegpt.get_db() as db:
+            db.execute("UPDATE cases SET risk_score=90, brief_facts=? WHERE id=417", ("PUBLIC-RECORD REFERENCE — REDACTED FOR DEVELOPMENT USE",))
+        self.login_as("INV001")
+        response = self.client.get("/cases")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Not assessed", response.data)
+        self.assertNotIn(b"90/100", response.data)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -281,6 +281,8 @@ def case_from_row(row, db=None):
         "time": data.pop("incident_time"), "lat": data.pop("latitude"), "lng": data.pop("longitude"),
         "brief": data.pop("brief_facts"), "risk": data.pop("risk_score"),
     })
+    if str(data.get("brief", "")).startswith("PUBLIC-RECORD REFERENCE"):
+        data["risk"] = -1
     data["accused"] = [item[0] for item in db.execute("SELECT a.canonical_name FROM accused a JOIN case_accused ca ON ca.accused_id=a.id WHERE ca.case_id=? ORDER BY ca.person_order", (data["id"],))]
     data["acts"] = [item[0] for item in db.execute("SELECT act_section FROM case_acts WHERE case_id=? ORDER BY act_section", (data["id"],))]
     if owns_connection:
@@ -315,7 +317,7 @@ def hydrate_cases_from_cloud():
                         case.get("major", "Other"), case.get("minor", "Other"), case.get("status", "Under Investigation"), case.get("gravity", "Non-Heinous"),
                         case.get("station", ""), case.get("district", ""), case.get("date", ""), case.get("time", ""), case.get("location", ""),
                         case.get("lat"), case.get("lng"), case.get("officer", ""), case.get("complainant", ""), case.get("victim", ""), case.get("brief", ""),
-                        case.get("risk", 0), case.get("source_language", "English"), case.get("source_document"),
+                        -1 if str(case.get("brief", "")).startswith("PUBLIC-RECORD REFERENCE") else case.get("risk", -1), case.get("source_language", "English"), case.get("source_document"),
                     ))
                     db.execute("DELETE FROM case_accused WHERE case_id=?", (case["id"],))
                     db.execute("DELETE FROM case_acts WHERE case_id=?", (case["id"],))
@@ -999,7 +1001,7 @@ def new_fir():
                     normalized_form_time(submitted("incident_time")) or datetime.now().strftime("%H:%M"), submitted("location", "Location pending verification"),
                     float(request.form.get("latitude") or 0), float(request.form.get("longitude") or 0), current_user()["name"],
                     submitted("complainant"), submitted("victim"), narrative,
-                    int(request.form.get("risk_score") or 0), detected_language, source_reference,
+                    int(request.form["risk_score"]) if request.form.get("risk_score", "").strip() else -1, detected_language, source_reference,
                 ))
                 for order, name in enumerate(filter(None, (part.strip() for part in submitted("accused").split(","))), 1):
                     accused_id, canonical_name, match_score = resolve_accused(db, name)
@@ -1123,10 +1125,10 @@ def model_evaluation():
 def dashboard():
     audit("VIEW", "AGGREGATE_DASHBOARD")
     with get_db() as db:
-        stats = dict(db.execute("SELECT COUNT(*) total, SUM(status='Under Investigation') active, ROUND(AVG(risk_score),1) avg_risk, SUM(gravity='Heinous') heinous FROM cases").fetchone())
+        stats = dict(db.execute("SELECT COUNT(*) total, SUM(status='Under Investigation') active, ROUND(AVG(CASE WHEN risk_score>=0 THEN risk_score END),1) avg_risk, SUM(gravity='Heinous') heinous FROM cases").fetchone())
         stats["linked"] = db.execute("SELECT COUNT(*) FROM accused WHERE (SELECT COUNT(*) FROM case_accused WHERE accused_id=accused.id)>1").fetchone()[0]
         rows = db.execute("SELECT incident_date, location, district, minor_head, risk_score FROM cases").fetchall()
-        hotspots = [dict(row) for row in db.execute("SELECT location, district, COUNT(*) case_count, ROUND(AVG(risk_score),0) risk FROM cases GROUP BY lower(location), lower(district) ORDER BY case_count DESC, risk DESC LIMIT 5")]
+        hotspots = [dict(row) for row in db.execute("SELECT location, district, COUNT(*) case_count, ROUND(AVG(CASE WHEN risk_score>=0 THEN risk_score END),0) risk FROM cases GROUP BY lower(location), lower(district) ORDER BY case_count DESC, risk DESC LIMIT 5")]
         repeat = [dict(row) for row in db.execute("SELECT a.canonical_name name, COUNT(*) case_count FROM accused a JOIN case_accused ca ON ca.accused_id=a.id GROUP BY a.id HAVING COUNT(*)>1 ORDER BY case_count DESC LIMIT 4")]
     monthly = {}
     for row in rows:
@@ -1142,7 +1144,8 @@ def dashboard():
         item["height"] = max(14, round(item["count"] / maximum * 100))
     alerts = []
     for item in hotspots[:2]:
-        alerts.append({"title": f"Hotspot signal · {item['location']}", "detail": f"{item['case_count']} recorded FIR(s), average risk {int(item['risk'] or 0)}/100. Review patrol coverage and recent link evidence."})
+        risk_detail = f"average assessed risk {int(item['risk'])}/100" if item["risk"] is not None else "risk not yet assessed"
+        alerts.append({"title": f"Hotspot signal · {item['location']}", "detail": f"{item['case_count']} recorded FIR(s), {risk_detail}. Review patrol coverage and recent link evidence."})
     for item in repeat[:2]:
         alerts.append({"title": f"Repeat-identity signal · {item['name']}", "detail": f"Appears in {item['case_count']} FIRs. This is an analytical lead; identity requires investigator verification."})
     return render_template("dashboard.html", stats=stats, trend=trend, hotspots=hotspots, alerts=alerts)
