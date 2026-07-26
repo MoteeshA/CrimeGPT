@@ -1181,12 +1181,18 @@ def ask_case(case_id):
     question_language = detect_language(question)
     store_message(conversation["id"], "user", question, question_language)
     normalized = question.lower()
-    context_text = f"{previous_user_question} {question}".lower() if any(term in normalized for term in ["his", "her", "their", "that", "those", "it", "ಅವನ", "ಅದರ", "ಅವು"] ) else normalized
+    english_context_reference = re.search(r"\b(?:his|her|their|that|those|it)\b", normalized)
+    kannada_context_reference = any(term in normalized for term in ["ಅವನ", "ಅದರ", "ಅವು"])
+    context_text = f"{previous_user_question} {question}".lower() if english_context_reference or kannada_context_reference else normalized
     linked = linked_cases(case_id)
     ai_result = grounded_ai_answer(question, case, linked, history)
     engine = "grounded-model" if ai_result else "deterministic-evidence-engine"
     if ai_result:
         answer, evidence, confidence, kind = ai_result["answer"], ai_result["evidence"], ai_result["confidence"], ai_result["kind"]
+    elif any(term in normalized for term in ["where", "when", "location", "place", "ಎಲ್ಲಿ", "ಯಾವಾಗ"]):
+        answer = f"The incident was recorded at {case['location']} on {case['date']} at {case['time']}."
+        evidence = [{"table": "CaseMaster", "field": "Location", "value": case["location"], "record": case["crime_no"]}, {"table": "CaseMaster", "field": "IncidentFromDate", "value": f"{case['date']} {case['time']}", "record": case["crime_no"]}]
+        confidence, kind = 100, "Verified fact"
     elif any(term in context_text for term in ["other case", "repeat", "linked", "history", "ಹಿಂದಿನ"]):
         if linked:
             names = ", ".join(f"FIR {item['case_no']} ({item['link_score']}% link score)" for item in linked[:4])
@@ -1196,10 +1202,6 @@ def ask_case(case_id):
             kind = "Analytical lead"
         else:
             answer, evidence, confidence, kind = "No linked case was found in the current authorised dataset.", [{"table": "Accused", "field": "CaseMasterID", "value": str(case_id), "record": "Current case"}], 100, "Verified fact"
-    elif any(term in context_text for term in ["where", "location", "place", "ಎಲ್ಲಿ"]):
-        answer = f"The incident was recorded at {case['location']} on {case['date']} at {case['time']}."
-        evidence = [{"table": "CaseMaster", "field": "latitude / longitude", "value": f"{case['lat']}, {case['lng']}", "record": case["crime_no"]}, {"table": "CaseMaster", "field": "IncidentFromDate", "value": f"{case['date']} {case['time']}", "record": case["crime_no"]}]
-        confidence, kind = 100, "Verified fact"
     elif any(term in context_text for term in ["section", "act", "charge", "ಕಲಂ"]):
         answer = "Recorded legal provisions: " + ", ".join(case["acts"]) + "."
         evidence = [{"table": "ActSectionAssociation", "field": "ActID / SectionID", "value": act, "record": case["crime_no"]} for act in case["acts"]]

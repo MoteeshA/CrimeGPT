@@ -59,6 +59,15 @@ class CrimeGPTTests(unittest.TestCase):
         self.assertTrue(response.json["evidence"])
         self.assertEqual(response.json["kind"], "Verified fact")
 
+    def test_this_incident_does_not_inherit_previous_link_intent(self):
+        self.login_as("INV001")
+        self.client.post("/api/case/501/ask", json={"question": "Is this accused linked to other cases?"})
+        response = self.client.post("/api/case/501/ask", json={"question": "Where and when did this incident occur?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Richmond Road", response.json["answer"])
+        self.assertEqual([item["field"] for item in response.json["evidence"]], ["Location", "IncidentFromDate"])
+        self.assertFalse(response.json["context_used"])
+
     def test_health_and_readiness(self):
         self.assertEqual(self.client.get("/health").json["status"], "ok")
         self.assertEqual(self.client.get("/ready").json["status"], "ready")
