@@ -269,7 +269,9 @@ def init_db():
                 "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, ?, 1)",
                 [(officer_id, generate_password_hash(item["password"], method="pbkdf2:sha256"), item["name"], item["role"], item["rank"], item["unit"]) for officer_id, item in USERS.items()],
             )
-        if demo_seed_enabled() and db.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 0:
+        # Reference FIRs may be enabled independently of demo login identities.
+        # They are synthetic development records, never an SCRB/CCTNS live feed.
+        if (demo_seed_enabled() or env_flag("SEED_REFERENCE_CASES")) and db.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 0:
             for case in CASES:
                 db.execute("""INSERT OR IGNORE INTO cases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                     case["id"], case["crime_no"], case["case_no"], case["title"], case["category"], case["major"], case["minor"],
@@ -977,7 +979,12 @@ def cases():
         else:
             rows = db.execute("SELECT * FROM cases ORDER BY incident_date DESC").fetchall()
         filtered = [case_from_row(row, db) for row in rows]
-    return render_template("cases.html", cases=filtered, query=query)
+    return render_template(
+        "cases.html",
+        cases=filtered,
+        query=query,
+        reference_dataset=env_flag("SEED_REFERENCE_CASES"),
+    )
 
 
 @app.route("/fir/new", methods=["GET", "POST"])

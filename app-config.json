@@ -4,7 +4,8 @@
 	"stack": "python_3_12",
 	"env_variables": {
 		"KSP_HOSTED_LOGIN_URL": "https://crimegpt-production-60080160471.development.catalystserverless.in/__catalyst/auth/login",
-		"DOCUMENT_FOLDER_REF": "48142000000023204"
+		"DOCUMENT_FOLDER_REF": "48142000000023204",
+		"SEED_REFERENCE_CASES": "1"
 	},
 	"memory": 512,
 	"scripts": {},
