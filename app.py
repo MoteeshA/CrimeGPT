@@ -9,10 +9,13 @@ import unicodedata
 import json
 import logging
 import secrets
+import threading
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape
 from difflib import SequenceMatcher
 from math import asin, cos, radians, sin, sqrt
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for, send_file
+from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for, send_file
 from werkzeug.security import check_password_hash, generate_password_hash
 from pypdf import PdfReader
 
@@ -28,6 +31,8 @@ app.config.update(
 )
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 DB_PATH = Path(os.environ.get("DATABASE_PATH", Path(__file__).with_name("ksp_intelligence.db")))
+CLOUD_SYNC_LOCK = threading.Lock()
+CLOUD_HYDRATED = False
 
 
 USERS = {
@@ -52,6 +57,62 @@ def get_db():
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def catalyst_enabled():
+    return os.environ.get("CATALYST_CLOUD_ENABLED", "").lower() in {"1", "true", "yes"} or bool(os.environ.get("X_ZOHO_CATALYST_LISTEN_PORT"))
+
+
+def catalyst_app():
+    """Return the request-scoped Catalyst SDK app, or None outside Catalyst."""
+    if not catalyst_enabled():
+        return None
+    if "catalyst_app" in g:
+        return g.catalyst_app
+    try:
+        import zcatalyst_sdk
+        try:
+            g.catalyst_app = zcatalyst_sdk.get_app()
+        except Exception:
+            g.catalyst_app = zcatalyst_sdk.initialize(req=request)
+        return g.catalyst_app
+    except Exception as exc:
+        app.logger.warning("Catalyst SDK is unavailable for %s: %s", request.path, exc)
+        g.catalyst_app = None
+        return None
+
+
+def cloud_rows(table_name):
+    cloud = catalyst_app()
+    if not cloud:
+        return []
+    return list(cloud.datastore().table(table_name).get_iterable_rows())
+
+
+def cloud_upsert(table_name, external_id, payload):
+    """Persist an ER-aligned JSON record in Catalyst Data Store."""
+    cloud = catalyst_app()
+    if not cloud:
+        return False
+    table = cloud.datastore().table(table_name)
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    existing = next((row for row in table.get_iterable_rows() if str(row.get("ExternalID")) == str(external_id)), None)
+    if existing:
+        table.update_row({"ROWID": existing["ROWID"], "ExternalID": str(external_id), "Payload": encoded})
+    else:
+        table.insert_row({"ExternalID": str(external_id), "Payload": encoded})
+    return True
+
+
+def cloud_upload(upload, filename):
+    folder_id = os.environ.get("CATALYST_FIR_FOLDER_ID", "").strip()
+    cloud = catalyst_app()
+    if not cloud or not folder_id or not upload:
+        return None
+    upload.stream.seek(0)
+    result = cloud.filestore().folder(folder_id).upload_file(filename, upload.stream)
+    upload.stream.seek(0)
+    return str(result.get("id") or result.get("file_id") or "") or None
 
 
 def init_db():
@@ -184,6 +245,47 @@ def case_from_row(row, db=None):
     return data
 
 
+def persist_case_to_cloud(case_id):
+    case = find_case(case_id)
+    if case:
+        cloud_upsert("CaseMaster", case["crime_no"], case)
+
+
+def hydrate_cases_from_cloud():
+    """Hydrate the local query cache once per worker from persistent Data Store."""
+    global CLOUD_HYDRATED
+    if CLOUD_HYDRATED or not catalyst_enabled():
+        return
+    with CLOUD_SYNC_LOCK:
+        if CLOUD_HYDRATED:
+            return
+        rows = cloud_rows("CaseMaster")
+        with get_db() as db:
+            for row in rows:
+                try:
+                    case = json.loads(row.get("Payload") or "{}")
+                    if not case.get("id") or not case.get("crime_no"):
+                        continue
+                    db.execute("""INSERT OR REPLACE INTO cases(id,crime_no,case_no,title,category,major_head,minor_head,status,gravity,station,district,incident_date,incident_time,location,latitude,longitude,officer,complainant,victim,brief_facts,risk_score,source_language,source_document)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                        case["id"], case["crime_no"], case.get("case_no", ""), case.get("title", "Untitled FIR"), case.get("category", "FIR"),
+                        case.get("major", "Other"), case.get("minor", "Other"), case.get("status", "Under Investigation"), case.get("gravity", "Non-Heinous"),
+                        case.get("station", ""), case.get("district", ""), case.get("date", ""), case.get("time", ""), case.get("location", ""),
+                        case.get("lat"), case.get("lng"), case.get("officer", ""), case.get("complainant", ""), case.get("victim", ""), case.get("brief", ""),
+                        case.get("risk", 0), case.get("source_language", "English"), case.get("source_document"),
+                    ))
+                    db.execute("DELETE FROM case_accused WHERE case_id=?", (case["id"],))
+                    db.execute("DELETE FROM case_acts WHERE case_id=?", (case["id"],))
+                    for order, name in enumerate(case.get("accused", []), 1):
+                        accused_id, _, _ = resolve_accused(db, name)
+                        db.execute("INSERT OR IGNORE INTO case_accused VALUES (?,?,?)", (case["id"], accused_id, order))
+                    db.executemany("INSERT OR IGNORE INTO case_acts VALUES (?,?)", [(case["id"], act) for act in case.get("acts", [])])
+                except (KeyError, TypeError, ValueError, sqlite3.Error):
+                    app.logger.exception("Skipped invalid Catalyst CaseMaster row %s", row.get("ROWID"))
+        CLOUD_HYDRATED = True
+        app.logger.info("Hydrated %s CaseMaster records from Catalyst Data Store", len(rows))
+
+
 def current_user():
     officer_id = session.get("officer_id")
     if not officer_id:
@@ -228,6 +330,12 @@ def csrf_token():
 
 @app.before_request
 def enforce_request_security():
+    if catalyst_enabled():
+        try:
+            catalyst_app()
+            hydrate_cases_from_cloud()
+        except Exception:
+            app.logger.exception("Catalyst persistence initialization failed")
     if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not app.config.get("TESTING"):
         supplied = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token")
         expected = session.get("csrf_token")
@@ -258,7 +366,15 @@ def ready():
     try:
         with get_db() as db:
             db.execute("SELECT 1").fetchone()
-        return jsonify({"status": "ready", "database": "available"})
+        cloud_status = "disabled"
+        if catalyst_enabled():
+            try:
+                catalyst_app().datastore().table("CaseMaster").get_paged_rows(max_rows=1)
+                cloud_status = "available"
+            except Exception:
+                cloud_status = "unavailable"
+        status = "ready" if cloud_status != "unavailable" else "degraded"
+        return jsonify({"status": status, "database": "available", "catalyst_datastore": cloud_status}), 200 if status == "ready" else 503
     except sqlite3.Error:
         app.logger.exception("Readiness database check failed")
         return jsonify({"status": "not-ready", "database": "unavailable"}), 503
@@ -278,8 +394,14 @@ def internal_error(error):
 def audit(action, resource, detail=""):
     user = current_user()
     if user:
+        occurred_at = datetime.now().isoformat(timespec="microseconds")
+        event = {"occurred_at": occurred_at, "officer_id": user["id"], "role": user["role"], "action": action, "resource": resource, "detail": detail}
         with get_db() as db:
-            db.execute("INSERT INTO audit_log(occurred_at,officer_id,role,action,resource,detail) VALUES (?,?,?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), user["id"], user["role"], action, resource, detail))
+            db.execute("INSERT INTO audit_log(occurred_at,officer_id,role,action,resource,detail) VALUES (?,?,?,?,?,?)", tuple(event.values()))
+        try:
+            cloud_upsert("AuditEvents", f"{occurred_at}:{secrets.token_hex(4)}", event)
+        except Exception:
+            app.logger.exception("Could not mirror audit event to Catalyst")
 
 
 def active_conversation(case_id, create=True):
@@ -306,6 +428,10 @@ def store_message(conversation_id, role, content, language, kind=None, confidenc
     with get_db() as db:
         db.execute("INSERT INTO conversation_messages(conversation_id,role,content,language,kind,confidence,evidence_json,created_at) VALUES (?,?,?,?,?,?,?,?)", (conversation_id, role, content, language, kind, confidence, json.dumps(evidence or [], ensure_ascii=False), now))
         db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
+    try:
+        cloud_upsert("Conversations", f"{conversation_id}:{now}:{role}", {"conversation_id": conversation_id, "role": role, "content": content, "language": language, "kind": kind, "confidence": confidence, "evidence": evidence or [], "created_at": now})
+    except Exception:
+        app.logger.exception("Could not mirror conversation message to Catalyst")
 
 
 def find_case(case_id):
@@ -536,6 +662,42 @@ def normalized_form_time(value):
     return value
 
 
+def grounded_ai_answer(question, case, linked, history):
+    """Call an optional private model endpoint with only authorised case context."""
+    endpoint = os.environ.get("AI_ENDPOINT_URL", "").strip()
+    if not endpoint:
+        return None
+    evidence_catalog = [
+        {"id": "case_brief", "table": "CaseMaster", "field": "BriefFacts", "value": case["brief"], "record": case["crime_no"]},
+        {"id": "case_location", "table": "CaseMaster", "field": "Location", "value": f"{case['location']} · {case['date']} {case['time']}", "record": case["crime_no"]},
+        {"id": "case_sections", "table": "ActSectionAssociation", "field": "ActID / SectionID", "value": ", ".join(case["acts"]), "record": case["crime_no"]},
+    ]
+    for item in linked[:6]:
+        evidence_catalog.append({"id": f"linked_{item['id']}", "table": "CaseRelationships", "field": "LinkScore", "value": f"{item['link_score']}% · {'; '.join(item['link_reasons'])}", "record": item["crime_no"]})
+    prompt = {
+        "instruction": "Answer the investigator using only the evidence catalog. Never invent a fact. Reply in the question's language (English or Kannada). Return strict JSON with answer, kind, confidence, and evidence_ids.",
+        "question": question,
+        "recent_context": [{"role": item["role"], "content": item["content"]} for item in history[-6:]],
+        "evidence_catalog": evidence_catalog,
+    }
+    headers = {"Content-Type": "application/json"}
+    if os.environ.get("AI_API_KEY"):
+        headers["Authorization"] = f"Bearer {os.environ['AI_API_KEY']}"
+    try:
+        response = urlopen(Request(endpoint, data=json.dumps(prompt, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST"), timeout=20)
+        result = json.loads(response.read().decode("utf-8"))
+        if isinstance(result.get("output"), str):
+            result = json.loads(result["output"])
+        selected = [item for item in evidence_catalog if item["id"] in result.get("evidence_ids", [])]
+        if not result.get("answer") or not selected:
+            raise ValueError("The model response was not evidence-grounded")
+        evidence = [{key: value for key, value in item.items() if key != "id"} for item in selected]
+        return {"answer": str(result["answer"]), "kind": result.get("kind", "AI-assisted analysis"), "confidence": max(0, min(int(result.get("confidence", 70)), 100)), "evidence": evidence}
+    except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        app.logger.warning("AI endpoint unavailable or invalid; using deterministic engine: %s", exc)
+        return None
+
+
 @app.context_processor
 def inject_globals():
     return {"user": current_user(), "current_year": datetime.now().year, "csrf_token": csrf_token()}
@@ -603,7 +765,10 @@ def new_fir():
     detected_language = ""
     if request.method == "POST":
         try:
-            extracted_text, source_document = extract_document(request.files.get("fir_document"))
+            source_upload = request.files.get("fir_document")
+            extracted_text, source_document = extract_document(source_upload)
+            cloud_file_id = cloud_upload(source_upload, source_document) if source_document else None
+            source_reference = f"{source_document} · Catalyst File ID {cloud_file_id}" if cloud_file_id else source_document
             narrative = request.form.get("brief_facts", "").strip() or extracted_text.strip()
             if not narrative:
                 raise ValueError("Enter the FIR narrative or upload a document containing searchable text.")
@@ -633,7 +798,7 @@ def new_fir():
                     normalized_form_time(submitted("incident_time")) or datetime.now().strftime("%H:%M"), submitted("location", "Location pending verification"),
                     float(request.form.get("latitude") or 0), float(request.form.get("longitude") or 0), current_user()["name"],
                     submitted("complainant"), submitted("victim"), narrative,
-                    int(request.form.get("risk_score") or 0), detected_language, source_document,
+                    int(request.form.get("risk_score") or 0), detected_language, source_reference,
                 ))
                 for order, name in enumerate(filter(None, (part.strip() for part in submitted("accused").split(","))), 1):
                     accused_id, canonical_name, match_score = resolve_accused(db, name)
@@ -641,8 +806,10 @@ def new_fir():
                 for act in filter(None, (part.strip() for part in submitted("acts").split(","))):
                     db.execute("INSERT INTO case_acts VALUES (?,?)", (next_id, act))
                 db.execute("""INSERT INTO fir_extractions(case_id,source_document,source_language,extraction_confidence,missing_fields,verified_by,created_at)
-                    VALUES (?,?,?,?,?,?,?)""", (next_id, source_document, detected_language, extraction["confidence"], ",".join(extraction["missing"]), current_user()["id"], datetime.now().isoformat(timespec="seconds")))
-            audit("CREATE", "FIR", f"{crime_no} · {detected_language} · {source_document or 'manual entry'}")
+                    VALUES (?,?,?,?,?,?,?)""", (next_id, source_reference, detected_language, extraction["confidence"], ",".join(extraction["missing"]), current_user()["id"], datetime.now().isoformat(timespec="seconds")))
+            persist_case_to_cloud(next_id)
+            cloud_upsert("FIRExtractions", crime_no, {"case_id": next_id, "source_document": source_reference, "source_language": detected_language, "confidence": extraction["confidence"], "missing": extraction["missing"], "verified_by": current_user()["id"]})
+            audit("CREATE", "FIR", f"{crime_no} · {detected_language} · {source_reference or 'manual entry'}")
             return redirect(url_for("case_board", case_id=next_id))
         except (ValueError, sqlite3.IntegrityError) as exc:
             error = str(exc)
@@ -727,7 +894,11 @@ def ask_case(case_id):
     normalized = question.lower()
     context_text = f"{previous_user_question} {question}".lower() if any(term in normalized for term in ["his", "her", "their", "that", "those", "it", "ಅವನ", "ಅದರ", "ಅವು"] ) else normalized
     linked = linked_cases(case_id)
-    if any(term in context_text for term in ["other case", "repeat", "linked", "history", "ಹಿಂದಿನ"]):
+    ai_result = grounded_ai_answer(question, case, linked, history)
+    engine = "grounded-model" if ai_result else "deterministic-evidence-engine"
+    if ai_result:
+        answer, evidence, confidence, kind = ai_result["answer"], ai_result["evidence"], ai_result["confidence"], ai_result["kind"]
+    elif any(term in context_text for term in ["other case", "repeat", "linked", "history", "ಹಿಂದಿನ"]):
         if linked:
             names = ", ".join(f"FIR {item['case_no']} ({item['link_score']}% link score)" for item in linked[:4])
             answer = f"Explainable cross-case leads found: {names}. Scores combine accused-name similarity, crime sub-head, distance and time window; identity must still be confirmed by an investigator."
@@ -750,7 +921,7 @@ def ask_case(case_id):
         confidence, kind = 100, "Verified fact"
     audit("AI_QUERY", "CASE", f"{case['crime_no']} · {question[:80]}")
     store_message(conversation["id"], "assistant", answer, question_language, kind, confidence, evidence)
-    return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "conversation_id": conversation["id"], "context_used": bool(previous_user_question and context_text != normalized), "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "minor": item["minor"], "score": item["link_score"], "reasons": item["link_reasons"]} for item in linked]})
+    return jsonify({"answer": answer, "evidence": evidence, "confidence": confidence, "kind": kind, "engine": engine, "conversation_id": conversation["id"], "context_used": bool(previous_user_question and context_text != normalized), "linked_cases": [{"id": item["id"], "case_no": item["case_no"], "minor": item["minor"], "score": item["link_score"], "reasons": item["link_reasons"]} for item in linked]})
 
 
 @app.post("/api/case/<int:case_id>/expand")

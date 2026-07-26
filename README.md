@@ -4,7 +4,7 @@ CrimeGPT is a Flask-based crime intelligence prototype for Datathon 2026 Problem
 
 ## Features
 
-- Persistent SQLite-backed FIR and relationship data
+- Catalyst Data Store-backed FIR, conversation, extraction, and audit persistence with a local SQLite query cache
 - Hashed demo authentication with role-aware navigation
 - Multilingual FIR narrative intake through manual entry, PDF, or TXT upload
 - Searchable case workspace and aggregate intelligence dashboard
@@ -13,6 +13,8 @@ CrimeGPT is a Flask-based crime intelligence prototype for Datathon 2026 Problem
 - Data-driven hotspot and repeat-offender colours
 - Animated incident, offender, and hotspot storylines
 - Record-level evidence trails and persistent audit events
+- Optional evidence-constrained model endpoint with deterministic evidence-engine fallback
+- English and Kannada voice input/output controls
 
 ## Local setup
 
@@ -33,6 +35,14 @@ Password: demo123
 ```
 
 The local SQLite database is generated automatically and is excluded from Git. Replace the development secret and demo authentication before deployment.
+
+## Catalyst production configuration
+
+AppSail initializes the Catalyst Python SDK per request. Set `CATALYST_CLOUD_ENABLED=1` to require Data Store persistence. The application uses `CaseMaster`, `Conversations`, `AuditEvents`, and `FIRExtractions`, each with `ExternalID` and `Payload` columns.
+
+Create a File Store folder and set its numeric ID as `CATALYST_FIR_FOLDER_ID` to retain source documents. Without it, extracted FIR records remain persistent but the original uploaded binary is not copied into File Store.
+
+Set `AI_ENDPOINT_URL` and, when required, `AI_API_KEY` to enable a private generative model. The model must return JSON containing `answer`, `kind`, `confidence`, and `evidence_ids`. Responses without authorised evidence IDs are rejected and the deterministic evidence engine is used instead.
 
 ## ER-aligned FIR extraction
 
