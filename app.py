@@ -303,6 +303,10 @@ def catalyst_auth_enabled():
 
 
 def catalyst_current_user():
+    if getattr(g, "_catalyst_identity_checked", False):
+        return getattr(g, "_catalyst_identity", None)
+    g._catalyst_identity_checked = True
+    g._catalyst_identity = None
     if not catalyst_auth_enabled() or not catalyst_enabled():
         return None
     try:
@@ -319,7 +323,7 @@ def catalyst_current_user():
             "app user": "investigator",
         }.get(role_name, "investigator")
         name = " ".join(filter(None, [identity.get("first_name"), identity.get("last_name")])).strip()
-        return {
+        g._catalyst_identity = {
             "id": str(identity.get("user_id") or identity.get("zuid") or identity.get("email_id")),
             "name": name or identity.get("email_id") or "Authorised user",
             "email": identity.get("email_id"),
@@ -328,6 +332,7 @@ def catalyst_current_user():
             "unit": "Karnataka State Police",
             "auth_source": "catalyst",
         }
+        return g._catalyst_identity
     except Exception as exc:
         app.logger.info("No authenticated Catalyst end-user for %s: %s", request.path, exc)
         return None
@@ -752,15 +757,13 @@ def grounded_ai_answer(question, case, linked, history):
 
 @app.context_processor
 def inject_globals():
-    return {"user": current_user(), "current_year": datetime.now().year, "csrf_token": csrf_token()}
+    page_user = None if request.endpoint == "login" and catalyst_auth_enabled() else current_user()
+    return {"user": page_user, "current_year": datetime.now().year, "csrf_token": csrf_token()}
 
 
 @app.route("/", methods=["GET", "POST"])
 def login():
     if catalyst_auth_enabled():
-        user = current_user()
-        if user:
-            return redirect(url_for("workspace"))
         return render_template("login.html", error=None, catalyst_auth=True)
     if current_user() and request.method == "GET":
         return redirect(url_for("workspace"))
